@@ -19,6 +19,12 @@ import '../models/run.dart';
 import '../models/scheduled_automation.dart';
 import '../models/terminal_session.dart';
 
+/// Runtime ownership helper kept as an extension so existing repository test
+/// doubles do not need to implement a new interface member.
+extension RunRepositoryRuntimePath on RunRepository {
+  String get databasePath => _databasePath;
+}
+
 void _ensureSqliteInitialized() {
   if (Platform.isLinux) {
     try {
@@ -43,11 +49,12 @@ Future<String> getDefaultDbPath() async {
 ///
 /// Handles migrations using `PRAGMA user_version`.
 class RunRepository {
-  RunRepository._(this._db) {
+  RunRepository._(this._db, this._databasePath) {
     _initSchemaAndMigrate();
   }
 
   final Database _db;
+  final String _databasePath;
 
   /// Schema version implemented by this repository.
   static const int currentSchemaVersion = 5;
@@ -59,7 +66,7 @@ class RunRepository {
     final db = sqlite3.open(dbPath);
     db.execute('PRAGMA journal_mode=WAL;');
     db.execute('PRAGMA foreign_keys=ON;');
-    return RunRepository._(db);
+    return RunRepository._(db, dbPath);
   }
 
   void _initSchemaAndMigrate() {
@@ -98,7 +105,9 @@ class RunRepository {
         model_display_name  TEXT
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs (created_at DESC);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs (created_at DESC);',
+    );
     _db.execute('CREATE INDEX IF NOT EXISTS idx_runs_status ON runs (status);');
 
     // Approvals table
@@ -118,8 +127,12 @@ class RunRepository {
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals (run_id);');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals (status);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals (run_id);',
+    );
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals (status);',
+    );
 
     // Artifacts table
     _db.execute('''
@@ -136,8 +149,12 @@ class RunRepository {
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts (run_id);');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts (type);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts (run_id);',
+    );
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts (type);',
+    );
 
     // Checkpoints table
     _db.execute('''
@@ -150,7 +167,9 @@ class RunRepository {
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON checkpoints (run_id, step_index DESC);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON checkpoints (run_id, step_index DESC);',
+    );
 
     // Settings table
     _db.execute('''
@@ -180,8 +199,12 @@ class RunRepository {
           FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
       ''');
-      _db.execute('CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals (run_id);');
-      _db.execute('CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals (status);');
+      _db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals (run_id);',
+      );
+      _db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals (status);',
+      );
 
       _db.execute('''
         CREATE TABLE IF NOT EXISTS artifacts (
@@ -197,8 +220,12 @@ class RunRepository {
           FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
       ''');
-      _db.execute('CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts (run_id);');
-      _db.execute('CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts (type);');
+      _db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts (run_id);',
+      );
+      _db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts (type);',
+      );
 
       _db.execute('''
         CREATE TABLE IF NOT EXISTS checkpoints (
@@ -210,7 +237,9 @@ class RunRepository {
           FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
       ''');
-      _db.execute('CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON checkpoints (run_id, step_index DESC);');
+      _db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON checkpoints (run_id, step_index DESC);',
+      );
     }
 
     if (fromVersion < 3) {
@@ -262,7 +291,9 @@ class RunRepository {
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_terminal_sessions_run_id ON terminal_sessions (run_id, started_at ASC);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_terminal_sessions_run_id ON terminal_sessions (run_id, started_at ASC);',
+    );
 
     _db.execute('''
       CREATE TABLE IF NOT EXISTS browser_sessions (
@@ -277,7 +308,9 @@ class RunRepository {
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_browser_sessions_run_id ON browser_sessions (run_id);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_browser_sessions_run_id ON browser_sessions (run_id);',
+    );
 
     _db.execute('''
       CREATE TABLE IF NOT EXISTS notifications (
@@ -290,8 +323,12 @@ class RunRepository {
         read        INTEGER NOT NULL DEFAULT 0
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications (created_at DESC);');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications (read);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications (created_at DESC);',
+    );
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications (read);',
+    );
   }
 
   void _createV5Tables() {
@@ -359,7 +396,9 @@ class RunRepository {
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_computer_sessions_run_id ON computer_sessions (run_id);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_computer_sessions_run_id ON computer_sessions (run_id);',
+    );
 
     _db.execute('''
       CREATE TABLE IF NOT EXISTS computer_actions (
@@ -381,7 +420,9 @@ class RunRepository {
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
       );
     ''');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_computer_actions_run_id ON computer_actions (run_id, requested_at ASC);');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_computer_actions_run_id ON computer_actions (run_id, requested_at ASC);',
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -460,36 +501,27 @@ class RunRepository {
 
   /// Returns the [Run] with [id], or `null` if it does not exist.
   Future<Run?> getRun(String id) async {
-    final result = _db.select(
-      'SELECT * FROM runs WHERE id = ? LIMIT 1;',
-      [id],
-    );
+    final result = _db.select('SELECT * FROM runs WHERE id = ? LIMIT 1;', [id]);
     if (result.isEmpty) return null;
 
     final run = _rowToRun(result.first);
     final artifacts = await getArtifactsForRun(id);
     final pendingApproval = await _getPendingApprovalForRun(id);
 
-    return run.copyWith(
-      artifacts: artifacts,
-      pendingApproval: pendingApproval,
-    );
+    return run.copyWith(artifacts: artifacts, pendingApproval: pendingApproval);
   }
 
   /// Returns all persisted runs, ordered by creation time (newest first).
   Future<List<Run>> getAllRuns() async {
-    final result = _db.select(
-      'SELECT * FROM runs ORDER BY created_at DESC;',
-    );
+    final result = _db.select('SELECT * FROM runs ORDER BY created_at DESC;');
     final runs = <Run>[];
     for (final row in result) {
       final run = _rowToRun(row);
       final artifacts = await getArtifactsForRun(run.id);
       final pendingApproval = await _getPendingApprovalForRun(run.id);
-      runs.add(run.copyWith(
-        artifacts: artifacts,
-        pendingApproval: pendingApproval,
-      ));
+      runs.add(
+        run.copyWith(artifacts: artifacts, pendingApproval: pendingApproval),
+      );
     }
     return runs;
   }
@@ -510,10 +542,9 @@ class RunRepository {
       final run = _rowToRun(row);
       final artifacts = await getArtifactsForRun(run.id);
       final pendingApproval = await _getPendingApprovalForRun(run.id);
-      runs.add(run.copyWith(
-        artifacts: artifacts,
-        pendingApproval: pendingApproval,
-      ));
+      runs.add(
+        run.copyWith(artifacts: artifacts, pendingApproval: pendingApproval),
+      );
     }
     return runs;
   }
@@ -548,7 +579,9 @@ class RunRepository {
   }
 
   Future<ApprovalRequest?> getApproval(String id) async {
-    final rows = _db.select('SELECT * FROM approvals WHERE id = ? LIMIT 1;', [id]);
+    final rows = _db.select('SELECT * FROM approvals WHERE id = ? LIMIT 1;', [
+      id,
+    ]);
     if (rows.isEmpty) return null;
     return _rowToApproval(rows.first);
   }
@@ -605,7 +638,9 @@ class RunRepository {
   }
 
   Future<Artifact?> getArtifact(String id) async {
-    final rows = _db.select('SELECT * FROM artifacts WHERE id = ? LIMIT 1;', [id]);
+    final rows = _db.select('SELECT * FROM artifacts WHERE id = ? LIMIT 1;', [
+      id,
+    ]);
     if (rows.isEmpty) return null;
     return _rowToArtifact(rows.first);
   }
@@ -665,7 +700,10 @@ class RunRepository {
 
   /// Retrieves a persisted setting by [key], or null if not set.
   Future<String?> getSetting(String key) async {
-    final rows = _db.select('SELECT value FROM settings WHERE key = ? LIMIT 1;', [key]);
+    final rows = _db.select(
+      'SELECT value FROM settings WHERE key = ? LIMIT 1;',
+      [key],
+    );
     if (rows.isEmpty) return null;
     return rows.first['value'] as String?;
   }
@@ -757,7 +795,10 @@ class RunRepository {
   }
 
   Future<BrowserSession?> getBrowserSessionForRun(String runId) async {
-    final rows = _db.select('SELECT * FROM browser_sessions WHERE run_id = ? LIMIT 1;', [runId]);
+    final rows = _db.select(
+      'SELECT * FROM browser_sessions WHERE run_id = ? LIMIT 1;',
+      [runId],
+    );
     if (rows.isEmpty) return null;
     return _rowToBrowserSession(rows.first);
   }
@@ -785,12 +826,18 @@ class RunRepository {
   }
 
   Future<List<AppNotification>> getAllNotifications({int limit = 100}) async {
-    final rows = _db.select('SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?;', [limit]);
+    final rows = _db.select(
+      'SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?;',
+      [limit],
+    );
     return rows.map(_rowToNotification).toList();
   }
 
   Future<void> markNotificationRead(String id, {bool read = true}) async {
-    _db.execute('UPDATE notifications SET read = ? WHERE id = ?;', [read ? 1 : 0, id]);
+    _db.execute('UPDATE notifications SET read = ? WHERE id = ?;', [
+      read ? 1 : 0,
+      id,
+    ]);
   }
 
   // ---------------------------------------------------------------------------
@@ -846,13 +893,18 @@ class RunRepository {
   }
 
   Future<ScheduledAutomation?> getAutomation(String id) async {
-    final rows = _db.select('SELECT * FROM scheduled_automations WHERE id = ? LIMIT 1;', [id]);
+    final rows = _db.select(
+      'SELECT * FROM scheduled_automations WHERE id = ? LIMIT 1;',
+      [id],
+    );
     if (rows.isEmpty) return null;
     return _rowToAutomation(rows.first);
   }
 
   Future<List<ScheduledAutomation>> getAllAutomations() async {
-    final rows = _db.select('SELECT * FROM scheduled_automations ORDER BY created_at DESC;');
+    final rows = _db.select(
+      'SELECT * FROM scheduled_automations ORDER BY created_at DESC;',
+    );
     return rows.map(_rowToAutomation).toList();
   }
 
@@ -876,11 +928,20 @@ class RunRepository {
   /// `processDueAutomations()` pass, or a previous process before a crash.
   /// This is the entire duplicate-trigger guard: the `UNIQUE` constraint on
   /// `automation_occurrences` makes the insert itself the atomic check.
-  Future<bool> claimOccurrence(String automationId, String occurrenceKey, {String? runId}) async {
+  Future<bool> claimOccurrence(
+    String automationId,
+    String occurrenceKey, {
+    String? runId,
+  }) async {
     try {
       _db.execute(
         'INSERT INTO automation_occurrences (automation_id, occurrence_key, run_id, created_at) VALUES (?, ?, ?, ?);',
-        [automationId, occurrenceKey, runId, DateTime.now().toUtc().toIso8601String()],
+        [
+          automationId,
+          occurrenceKey,
+          runId,
+          DateTime.now().toUtc().toIso8601String(),
+        ],
       );
       return true;
     } on SqliteException catch (e) {
@@ -897,7 +958,11 @@ class RunRepository {
   /// `claimOccurrence()` reserves the row before the Run exists (that
   /// ordering is what makes the claim race-safe); this fills in `run_id`
   /// once Run creation has actually succeeded.
-  Future<void> linkOccurrenceRun(String automationId, String occurrenceKey, String runId) async {
+  Future<void> linkOccurrenceRun(
+    String automationId,
+    String occurrenceKey,
+    String runId,
+  ) async {
     _db.execute(
       'UPDATE automation_occurrences SET run_id = ? WHERE automation_id = ? AND occurrence_key = ?;',
       [runId, automationId, occurrenceKey],
@@ -938,7 +1003,9 @@ class RunRepository {
       providerId: row['provider_id'] as String?,
       modelId: row['model_id'] as String?,
       modelDisplayName: row['model_display_name'] as String?,
-      scheduleType: AutomationScheduleType.fromString(row['schedule_type'] as String?),
+      scheduleType: AutomationScheduleType.fromString(
+        row['schedule_type'] as String?,
+      ),
       scheduleExpression: expr,
       timezone: row['timezone'] as String? ?? 'UTC',
       enabled: (row['enabled'] as int? ?? 1) != 0,
@@ -983,7 +1050,10 @@ class RunRepository {
   }
 
   Future<ComputerSession?> getComputerSessionForRun(String runId) async {
-    final rows = _db.select('SELECT * FROM computer_sessions WHERE run_id = ? LIMIT 1;', [runId]);
+    final rows = _db.select(
+      'SELECT * FROM computer_sessions WHERE run_id = ? LIMIT 1;',
+      [runId],
+    );
     if (rows.isEmpty) return null;
     return _rowToComputerSession(rows.first);
   }
@@ -1067,8 +1137,12 @@ class RunRepository {
       textMetadata: row['text_metadata'] as String?,
       status: ComputerActionStatus.fromString(row['status'] as String?),
       requestedAt: DateTime.parse(row['requested_at'] as String).toUtc(),
-      startedAt: row['started_at'] != null ? DateTime.tryParse(row['started_at'] as String)?.toUtc() : null,
-      completedAt: row['completed_at'] != null ? DateTime.tryParse(row['completed_at'] as String)?.toUtc() : null,
+      startedAt: row['started_at'] != null
+          ? DateTime.tryParse(row['started_at'] as String)?.toUtc()
+          : null,
+      completedAt: row['completed_at'] != null
+          ? DateTime.tryParse(row['completed_at'] as String)?.toUtc()
+          : null,
       result: result,
       failure: row['failure'] as String?,
     );
@@ -1255,7 +1329,9 @@ class RunRepository {
       truncated: (row['truncated'] as int? ?? 0) != 0,
       outputPreview: row['output_preview'] as String? ?? '',
       startedAt: DateTime.parse(row['started_at'] as String),
-      completedAt: row['completed_at'] != null ? DateTime.tryParse(row['completed_at'] as String) : null,
+      completedAt: row['completed_at'] != null
+          ? DateTime.tryParse(row['completed_at'] as String)
+          : null,
     );
   }
 
@@ -1265,7 +1341,9 @@ class RunRepository {
     if (historyRaw != null && historyRaw.isNotEmpty) {
       try {
         history = (jsonDecode(historyRaw) as List<dynamic>)
-            .map((h) => BrowserNavigationEntry.fromJson(h as Map<String, dynamic>))
+            .map(
+              (h) => BrowserNavigationEntry.fromJson(h as Map<String, dynamic>),
+            )
             .toList();
       } catch (_) {}
     }

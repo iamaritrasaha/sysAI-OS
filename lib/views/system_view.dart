@@ -28,6 +28,7 @@ class SystemView extends ConsumerWidget {
 
     final bridge = ref.watch(bridgeServiceProvider);
     final bridgeStatus = ref.watch(bridgeStatusProvider);
+    final runtimeStatus = ref.watch(runtimeStatusProvider).valueOrNull ?? {};
     final doctorStatus = ref.watch(systemStatusProvider);
     final sysaiConfig = ref.watch(sysaiConfigProvider).valueOrNull ?? {};
 
@@ -45,11 +46,16 @@ class SystemView extends ConsumerWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('System', style: AppText.pageTitle.copyWith(color: onSurface)),
+                      Text(
+                        'System',
+                        style: AppText.pageTitle.copyWith(color: onSurface),
+                      ),
                       const SizedBox(height: 3),
                       Text(
                         'Models, engine health, capabilities, and storage',
-                        style: AppText.bodySecondary.copyWith(color: onSurface.withAlpha(140)),
+                        style: AppText.bodySecondary.copyWith(
+                          color: onSurface.withAlpha(140),
+                        ),
                       ),
                     ],
                   ),
@@ -84,9 +90,10 @@ class SystemView extends ConsumerWidget {
             _ConnectivityCard(
               bridge: bridge,
               bridgeStatus: bridgeStatus,
-              onRetry: () =>
-                  ref.read(bridgeStatusProvider.notifier).retry(),
+              onRetry: () => ref.read(bridgeStatusProvider.notifier).retry(),
             ),
+            const SizedBox(height: Space.md),
+            _RuntimeCard(status: runtimeStatus),
             const SizedBox(height: Space.md),
             Container(
               padding: const EdgeInsets.all(Space.lg),
@@ -120,7 +127,8 @@ class SystemView extends ConsumerWidget {
                   const Divider(height: 16),
                   _InfoRow(
                     label: 'Config Directory',
-                    value: sysaiConfig['config_dir'] as String? ??
+                    value:
+                        sysaiConfig['config_dir'] as String? ??
                         '${Platform.environment['HOME'] ?? '~'}/.config/sysai',
                     isPath: true,
                   ),
@@ -148,16 +156,20 @@ class SystemView extends ConsumerWidget {
             _SectionLabel('DIAGNOSTICS'),
             const SizedBox(height: Space.sm),
             doctorStatus.when(
-              loading: () => const LoadingStatePanel(message: 'Running diagnostics…'),
+              loading: () =>
+                  const LoadingStatePanel(message: 'Running diagnostics…'),
               error: (err, _) => ErrorStatePanel(
                 message: 'Failed to load doctor results: $err',
-                onRetry: () => ref.read(systemStatusProvider.notifier).refresh(),
+                onRetry: () =>
+                    ref.read(systemStatusProvider.notifier).refresh(),
               ),
               data: (data) {
                 final checks = data['checks'] as List<dynamic>? ?? [];
                 final overall = data['overall'] as String? ?? 'Healthy';
                 final attentionCount = data['attention_count'] as int? ?? 0;
-                final tone = attentionCount > 0 ? const Color(0xfff0b84c) : const Color(0xff8fd67a);
+                final tone = attentionCount > 0
+                    ? const Color(0xfff0b84c)
+                    : const Color(0xff8fd67a);
 
                 return Column(
                   children: [
@@ -173,17 +185,27 @@ class SystemView extends ConsumerWidget {
                       child: Row(
                         children: [
                           Icon(
-                            attentionCount > 0 ? Icons.warning_amber : Icons.check_circle_outline,
+                            attentionCount > 0
+                                ? Icons.warning_amber
+                                : Icons.check_circle_outline,
                             size: IconSizes.lg,
                             color: tone,
                           ),
                           const SizedBox(width: Space.sm),
-                          Text('Overall Status: $overall', style: AppText.bodyStrong.copyWith(color: onSurface)),
+                          Text(
+                            'Overall Status: $overall',
+                            style: AppText.bodyStrong.copyWith(
+                              color: onSurface,
+                            ),
+                          ),
                           const Spacer(),
                           if (attentionCount > 0)
                             Text(
                               '$attentionCount item${attentionCount == 1 ? '' : 's'} need attention',
-                              style: AppText.bodySecondary.copyWith(color: tone, fontWeight: FontWeight.w600),
+                              style: AppText.bodySecondary.copyWith(
+                                color: tone,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                         ],
                       ),
@@ -203,8 +225,8 @@ class SystemView extends ConsumerWidget {
                         separatorBuilder: (context, index) =>
                             Divider(height: 1, color: onSurface.withAlpha(12)),
                         itemBuilder: (context, index) {
-                          final check =
-                              (checks[index] as Map).cast<String, dynamic>();
+                          final check = (checks[index] as Map)
+                              .cast<String, dynamic>();
                           return _CheckItem(check: check);
                         },
                       ),
@@ -213,9 +235,47 @@ class SystemView extends ConsumerWidget {
                 );
               },
             ),
-
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _RuntimeCard extends StatelessWidget {
+  final Map<String, dynamic> status;
+  const _RuntimeCard({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final running = status['scheduler_running'] == true;
+    final value = status.isEmpty ? 'Offline' : 'Connected';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: onSurface.withAlpha(6),
+        borderRadius: Radii.mdR,
+        border: Border.all(color: onSurface.withAlpha(15)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            running ? Icons.dns_outlined : Icons.cloud_off,
+            size: 18,
+            color: running ? const Color(0xffa5e887) : onSurface.withAlpha(120),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            'Runtime',
+            style: TextStyle(fontWeight: FontWeight.w700, color: onSurface),
+          ),
+          const Spacer(),
+          Text(
+            '$value  •  PID ${status['pid'] ?? '—'}  •  ${status['active_runs'] ?? 0} active Runs',
+            style: TextStyle(fontSize: 12, color: onSurface.withAlpha(150)),
+          ),
+        ],
       ),
     );
   }
@@ -362,7 +422,12 @@ class _InfoRow extends StatelessWidget {
       children: [
         SizedBox(
           width: 200,
-          child: Text(label, style: AppText.bodySecondary.copyWith(color: onSurface.withAlpha(140))),
+          child: Text(
+            label,
+            style: AppText.bodySecondary.copyWith(
+              color: onSurface.withAlpha(140),
+            ),
+          ),
         ),
         Expanded(
           child: Text(
@@ -410,7 +475,11 @@ class _StorageSection extends StatelessWidget {
           ),
           child: Column(
             children: [
-              _InfoRow(label: 'Runs Database', value: dbPath ?? 'Resolving…', isPath: true),
+              _InfoRow(
+                label: 'Runs Database',
+                value: dbPath ?? 'Resolving…',
+                isPath: true,
+              ),
               const Divider(height: 16),
               _InfoRow(label: 'Database Size', value: sizeLabel),
               const Divider(height: 16),
@@ -454,7 +523,11 @@ class _ModelsSection extends ConsumerWidget {
                 ref.invalidate(providersListProvider);
                 ref.invalidate(modelsListProvider);
               },
-              icon: Icon(Icons.refresh, size: IconSizes.md, color: onSurface.withAlpha(150)),
+              icon: Icon(
+                Icons.refresh,
+                size: IconSizes.md,
+                color: onSurface.withAlpha(150),
+              ),
               tooltip: 'Refresh providers & models',
               splashRadius: 18,
             ),
@@ -476,20 +549,30 @@ class _ModelsSection extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('SysAI OS Default Model', style: AppText.bodyStrong.copyWith(color: onSurface)),
+                    Text(
+                      'SysAI OS Default Model',
+                      style: AppText.bodyStrong.copyWith(color: onSurface),
+                    ),
                     const SizedBox(height: 2),
                     Text(
                       'Used for every new Run unless overridden in the goal composer.',
-                      style: AppText.bodySecondary.copyWith(color: onSurface.withAlpha(140)),
+                      style: AppText.bodySecondary.copyWith(
+                        color: onSurface.withAlpha(140),
+                      ),
                     ),
                   ],
                 ),
               ),
               const SizedBox(width: Space.lg),
               ModelSelectorButton(
-                placeholder: defaultModel?.modelDisplayName ?? defaultModel?.modelId ?? 'Not set',
+                placeholder:
+                    defaultModel?.modelDisplayName ??
+                    defaultModel?.modelId ??
+                    'Not set',
                 selectedModelId: defaultModel?.modelId,
-                onSelected: (m) => ref.read(defaultModelProvider.notifier).setDefault(
+                onSelected: (m) => ref
+                    .read(defaultModelProvider.notifier)
+                    .setDefault(
                       providerId: m.provider,
                       modelId: m.id,
                       modelDisplayName: m.displayName,
@@ -501,12 +584,21 @@ class _ModelsSection extends ConsumerWidget {
         const SizedBox(height: Space.lg),
 
         // Providers
-        Text('PROVIDERS', style: AppText.label.copyWith(color: onSurface.withAlpha(120))),
+        Text(
+          'PROVIDERS',
+          style: AppText.label.copyWith(color: onSurface.withAlpha(120)),
+        ),
         const SizedBox(height: Space.sm),
         if (isLoading && providers.isEmpty)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: Space.lg),
-            child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))),
+            child: Center(
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
           )
         else
           Container(
@@ -524,7 +616,12 @@ class _ModelsSection extends ConsumerWidget {
                 if (providers.isEmpty)
                   Padding(
                     padding: const EdgeInsets.all(Space.lg),
-                    child: Text('No providers discovered.', style: AppText.bodySecondary.copyWith(color: onSurface.withAlpha(140))),
+                    child: Text(
+                      'No providers discovered.',
+                      style: AppText.bodySecondary.copyWith(
+                        color: onSurface.withAlpha(140),
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -532,7 +629,10 @@ class _ModelsSection extends ConsumerWidget {
         const SizedBox(height: Space.lg),
 
         // Models
-        Text('DISCOVERED MODELS (${models.length})', style: AppText.label.copyWith(color: onSurface.withAlpha(120))),
+        Text(
+          'DISCOVERED MODELS (${models.length})',
+          style: AppText.label.copyWith(color: onSurface.withAlpha(120)),
+        ),
         const SizedBox(height: Space.sm),
         Container(
           decoration: BoxDecoration(
@@ -551,7 +651,9 @@ class _ModelsSection extends ConsumerWidget {
                   padding: const EdgeInsets.all(Space.lg),
                   child: Text(
                     'No models discovered. Check that Ollama is running or a provider is configured.',
-                    style: AppText.bodySecondary.copyWith(color: onSurface.withAlpha(140)),
+                    style: AppText.bodySecondary.copyWith(
+                      color: onSurface.withAlpha(140),
+                    ),
                   ),
                 ),
             ],
@@ -572,10 +674,15 @@ class _ProviderRow extends StatelessWidget {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final tone = provider.available
         ? const Color(0xff8fd67a)
-        : (provider.configured ? const Color(0xfff0b84c) : onSurface.withAlpha(110));
+        : (provider.configured
+              ? const Color(0xfff0b84c)
+              : onSurface.withAlpha(110));
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: Space.lg, vertical: Space.md),
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.lg,
+        vertical: Space.md,
+      ),
       child: Row(
         children: [
           Container(
@@ -588,23 +695,37 @@ class _ProviderRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(children: [
-                  Text(provider.name, style: AppText.bodyStrong.copyWith(color: onSurface)),
-                  const SizedBox(width: 6),
-                  Icon(provider.local ? Icons.dns_rounded : Icons.cloud_outlined,
-                      size: IconSizes.sm, color: onSurface.withAlpha(120)),
-                ]),
+                Row(
+                  children: [
+                    Text(
+                      provider.name,
+                      style: AppText.bodyStrong.copyWith(color: onSurface),
+                    ),
+                    const SizedBox(width: 6),
+                    Icon(
+                      provider.local ? Icons.dns_rounded : Icons.cloud_outlined,
+                      size: IconSizes.sm,
+                      color: onSurface.withAlpha(120),
+                    ),
+                  ],
+                ),
                 if (provider.statusMessage != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
-                    child: Text(provider.statusMessage!,
-                        style: AppText.metadata.copyWith(color: onSurface.withAlpha(130))),
+                    child: Text(
+                      provider.statusMessage!,
+                      style: AppText.metadata.copyWith(
+                        color: onSurface.withAlpha(130),
+                      ),
+                    ),
                   ),
               ],
             ),
           ),
           Text(
-            provider.available ? 'Available' : (provider.configured ? 'Configured' : 'Not configured'),
+            provider.available
+                ? 'Available'
+                : (provider.configured ? 'Configured' : 'Not configured'),
             style: AppText.metadata.copyWith(color: tone),
           ),
         ],
@@ -621,31 +742,52 @@ class _ModelRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
-    final tone = model.available ? const Color(0xff8fd67a) : const Color(0xffef6a6a);
+    final tone = model.available
+        ? const Color(0xff8fd67a)
+        : const Color(0xffef6a6a);
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: Space.lg, vertical: Space.md),
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.lg,
+        vertical: Space.md,
+      ),
       child: Row(
         children: [
-          Icon(model.local ? Icons.dns_rounded : Icons.cloud_outlined,
-              size: IconSizes.sm, color: onSurface.withAlpha(130)),
+          Icon(
+            model.local ? Icons.dns_rounded : Icons.cloud_outlined,
+            size: IconSizes.sm,
+            color: onSurface.withAlpha(130),
+          ),
           const SizedBox(width: Space.md),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(model.displayName, style: AppText.code.copyWith(fontSize: 12.5, color: onSurface)),
+                Text(
+                  model.displayName,
+                  style: AppText.code.copyWith(
+                    fontSize: 12.5,
+                    color: onSurface,
+                  ),
+                ),
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
                   child: Text(
-                    model.available ? model.provider : (model.unavailableReason ?? 'Unavailable'),
-                    style: AppText.metadata.copyWith(color: model.available ? onSurface.withAlpha(130) : tone),
+                    model.available
+                        ? model.provider
+                        : (model.unavailableReason ?? 'Unavailable'),
+                    style: AppText.metadata.copyWith(
+                      color: model.available ? onSurface.withAlpha(130) : tone,
+                    ),
                   ),
                 ),
               ],
             ),
           ),
-          Text(model.available ? 'Available' : 'Unavailable', style: AppText.metadata.copyWith(color: tone)),
+          Text(
+            model.available ? 'Available' : 'Unavailable',
+            style: AppText.metadata.copyWith(color: tone),
+          ),
         ],
       ),
     );
@@ -665,22 +807,10 @@ class _CheckItem extends StatelessWidget {
     final detail = check['detail'] as String? ?? '';
 
     final (color, icon) = switch (status) {
-      'ok' => (
-          const Color(0xffa5e887),
-          Icons.check_circle_outline,
-        ),
-      'attention' => (
-          const Color(0xffffc46b),
-          Icons.warning_amber,
-        ),
-      'info' => (
-          const Color(0xff65d5e8),
-          Icons.info_outline,
-        ),
-      _ => (
-          const Color(0xff91a2ab),
-          Icons.remove_circle_outline,
-        ),
+      'ok' => (const Color(0xffa5e887), Icons.check_circle_outline),
+      'attention' => (const Color(0xffffc46b), Icons.warning_amber),
+      'info' => (const Color(0xff65d5e8), Icons.info_outline),
+      _ => (const Color(0xff91a2ab), Icons.remove_circle_outline),
     };
 
     return Padding(
@@ -738,8 +868,10 @@ class _CapabilityRegistrySection extends ConsumerWidget {
           color: const Color(0xffff6b6b).withAlpha(15),
           borderRadius: BorderRadius.circular(8),
         ),
-        child: Text('Failed to load capabilities: $err',
-            style: const TextStyle(color: Color(0xffff6b6b))),
+        child: Text(
+          'Failed to load capabilities: $err',
+          style: const TextStyle(color: Color(0xffff6b6b)),
+        ),
       ),
       data: (caps) {
         if (caps.isEmpty) {
@@ -921,7 +1053,9 @@ class _CapabilityItemRow extends StatelessWidget {
               decoration: BoxDecoration(
                 color: const Color(0xffff9f43).withAlpha(20),
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: const Color(0xffff9f43).withAlpha(80)),
+                border: Border.all(
+                  color: const Color(0xffff9f43).withAlpha(80),
+                ),
               ),
               child: const Text(
                 'APPROVAL REQUIRED',
@@ -951,30 +1085,30 @@ class _RiskBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final (bg, border, fg) = switch (risk) {
       CapabilityRisk.observe => (
-          const Color(0xff65d5e8).withAlpha(20),
-          const Color(0xff65d5e8).withAlpha(80),
-          const Color(0xff65d5e8),
-        ),
+        const Color(0xff65d5e8).withAlpha(20),
+        const Color(0xff65d5e8).withAlpha(80),
+        const Color(0xff65d5e8),
+      ),
       CapabilityRisk.low => (
-          const Color(0xffa5e887).withAlpha(20),
-          const Color(0xffa5e887).withAlpha(80),
-          const Color(0xffa5e887),
-        ),
+        const Color(0xffa5e887).withAlpha(20),
+        const Color(0xffa5e887).withAlpha(80),
+        const Color(0xffa5e887),
+      ),
       CapabilityRisk.medium => (
-          const Color(0xffffc46b).withAlpha(20),
-          const Color(0xffffc46b).withAlpha(80),
-          const Color(0xffffc46b),
-        ),
+        const Color(0xffffc46b).withAlpha(20),
+        const Color(0xffffc46b).withAlpha(80),
+        const Color(0xffffc46b),
+      ),
       CapabilityRisk.high => (
-          const Color(0xffff9f43).withAlpha(25),
-          const Color(0xffff9f43).withAlpha(90),
-          const Color(0xffff9f43),
-        ),
+        const Color(0xffff9f43).withAlpha(25),
+        const Color(0xffff9f43).withAlpha(90),
+        const Color(0xffff9f43),
+      ),
       CapabilityRisk.privileged => (
-          const Color(0xffff5252).withAlpha(30),
-          const Color(0xffff5252).withAlpha(100),
-          const Color(0xffff5252),
-        ),
+        const Color(0xffff5252).withAlpha(30),
+        const Color(0xffff5252).withAlpha(100),
+        const Color(0xffff5252),
+      ),
     };
 
     return Container(
@@ -996,4 +1130,3 @@ class _RiskBadge extends StatelessWidget {
     );
   }
 }
-

@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -885,7 +886,24 @@ class _OutcomeBlock extends StatelessWidget {
             ],
           ),
           const SizedBox(height: Space.sm),
-          SelectableText(text, style: AppText.body.copyWith(fontSize: 13, height: 1.5, color: onSurface)),
+          SelectionArea(
+            child: MarkdownBody(
+              data: text,
+              selectable: true,
+              shrinkWrap: true,
+              styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
+                p: AppText.body.copyWith(fontSize: 13, height: 1.5, color: onSurface),
+                h3: AppText.bodyStrong.copyWith(fontSize: 15, color: onSurface),
+                listBullet: AppText.body.copyWith(fontSize: 13, color: onSurface),
+                blockquote: AppText.body.copyWith(fontSize: 13, height: 1.5, color: onSurface.withAlpha(190)),
+                code: AppText.code.copyWith(fontSize: 12, color: onSurface),
+                codeblockDecoration: BoxDecoration(
+                  color: onSurface.withAlpha(10),
+                  borderRadius: Radii.smR,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -1059,4 +1077,3 @@ class _RunModelRow extends ConsumerWidget {
     );
   }
 }
-

@@ -44,6 +44,22 @@ flutter pub get
 flutter run -d linux
 ```
 
+The desktop app connects to a per-user `sysai-os/runtime.sock`. If it is not
+already running, Flutter starts `bridge/sysai_os_runtime.py` detached. To
+inspect the runtime directly:
+
+```bash
+PYTHONPATH=bridge SYSAI_PATH=/path/to/sysai/src \
+  python3 bridge/sysai_os_runtime.py
+```
+
+Set `SYSAI_RUNTIME_DIR`, `SYSAI_RUNTIME_SOCKET`, or `SYSAI_RUNTIME_DB` for
+isolated development/test locations. The socket is local-only and the
+runtime directory is user-scoped. Closing Flutter is intentionally not a
+runtime shutdown; use the `runtime.shutdown` IPC operation for an explicit
+stop. Models are discovered from the connected SysAI providers at runtime;
+SysAI OS does not select or embed a fixed model name.
+
 ---
 
 ## Running Tests
@@ -73,7 +89,8 @@ export SYSAI_PATH="/path/to/sysai/src"
 python3 bridge/sysai_bridge.py
 ```
 
-Then paste JSON-RPC-like commands to `stdin`:
+Then paste JSON-RPC-like commands to `stdin` (this legacy bridge entrypoint is
+still supported for compatibility; desktop uses the runtime socket):
 
 ```json
 {"id": "1", "method": "get_doctor", "params": {"probe_model": false}}

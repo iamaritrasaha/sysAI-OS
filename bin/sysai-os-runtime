@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Repository entrypoint for the SysAI OS persistent runtime."""
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bridge"))
+from sysai_os_runtime import main
+
+raise SystemExit(main())

@@ -50,9 +50,19 @@ class BridgeNotifier extends AsyncNotifier<BridgeStatus> {
       if (!state.isLoading) {
         state = AsyncValue.data(bridge.status);
       }
+      if (bridge.status == BridgeStatus.connected) {
+        unawaited(_restoreRuntimeState());
+      }
     });
 
-    await bridge.start(bridgeScript, sysaiPath);
+    String? databasePath;
+    try {
+      databasePath = await getDefaultDbPath();
+    } catch (_) {
+      // Pure ProviderContainer tests do not install ServicesBinding. The
+      // runtime has a portable per-user default when path_provider is absent.
+    }
+    await bridge.start(bridgeScript, sysaiPath, databasePath: databasePath);
     return bridge.status;
   }
 
@@ -63,9 +73,22 @@ class BridgeNotifier extends AsyncNotifier<BridgeStatus> {
     state = await AsyncValue.guard(() async {
       final sysaiPath = SysAIConfig.discoverSysAIPathSync();
       final bridgeScript = SysAIConfig.getBridgeScriptPath();
-      await bridge.start(bridgeScript, sysaiPath);
+      String? databasePath;
+      try {
+        databasePath = await getDefaultDbPath();
+      } catch (_) {}
+      await bridge.start(bridgeScript, sysaiPath, databasePath: databasePath);
       return bridge.status;
     });
+  }
+
+  Future<void> _restoreRuntimeState() async {
+    try {
+      await ref.read(runListProvider.notifier).refreshFromRuntime();
+      await ref.read(runExecutorProvider).reconnectActiveRuns();
+    } catch (_) {
+      // A reconnect race is expected while the runtime is restarting.
+    }
   }
 }
 
@@ -83,6 +106,20 @@ final capabilitiesProvider = FutureProvider<List<Capability>>((ref) async {
     return await bridge.listCapabilities();
   } catch (_) {
     return [];
+  }
+});
+
+/// Compact service-health snapshot. It is deliberately separate from the
+/// engine doctor result: the runtime can be healthy even when SysAI itself is
+/// unavailable, and vice versa.
+final runtimeStatusProvider = FutureProvider<Map<String, dynamic>>((ref) async {
+  await ref.watch(bridgeStatusProvider.future);
+  final bridge = ref.read(bridgeServiceProvider);
+  if (!bridge.isReady) return {};
+  try {
+    return await bridge.runtimeStatus();
+  } catch (_) {
+    return {};
   }
 });
 
@@ -116,8 +153,10 @@ class SystemStatusNotifier extends AsyncNotifier<Map<String, dynamic>> {
       };
     }
     try {
-      final result =
-          await bridge.call('get_doctor', params: {'probe_model': false});
+      final result = await bridge.call(
+        'get_doctor',
+        params: {'probe_model': false},
+      );
       return {'available': true, ...result};
     } on BridgeException catch (e) {
       return {'available': false, 'error': e.message};
@@ -132,7 +171,8 @@ class SystemStatusNotifier extends AsyncNotifier<Map<String, dynamic>> {
 
 final systemStatusProvider =
     AsyncNotifierProvider<SystemStatusNotifier, Map<String, dynamic>>(
-        SystemStatusNotifier.new);
+      SystemStatusNotifier.new,
+    );
 
 /// Provider for SysAI configuration.
 final sysaiConfigProvider = FutureProvider<Map<String, dynamic>>((ref) async {
@@ -201,17 +241,20 @@ class DefaultModelNotifier extends AsyncNotifier<DefaultModelSelection> {
     if (modelDisplayName != null) {
       await repo.setSetting(_kSettingDefaultModelDisplayName, modelDisplayName);
     }
-    state = AsyncValue.data(DefaultModelSelection(
-      providerId: providerId,
-      modelId: modelId,
-      modelDisplayName: modelDisplayName,
-    ));
+    state = AsyncValue.data(
+      DefaultModelSelection(
+        providerId: providerId,
+        modelId: modelId,
+        modelDisplayName: modelDisplayName,
+      ),
+    );
   }
 }
 
 final defaultModelProvider =
     AsyncNotifierProvider<DefaultModelNotifier, DefaultModelSelection>(
-        DefaultModelNotifier.new);
+      DefaultModelNotifier.new,
+    );
 
 // ── Terminal Sessions (Phase 3) ───────────────────────────────────────────────
 
@@ -219,7 +262,8 @@ final defaultModelProvider =
 /// live, in-memory source of truth (updated directly as
 /// `terminal.session.*` events arrive) — [RunRepository] holds the durable
 /// copy for history/restart, loaded on demand via [ensureLoaded].
-class TerminalSessionsNotifier extends StateNotifier<Map<String, List<TerminalSession>>> {
+class TerminalSessionsNotifier
+    extends StateNotifier<Map<String, List<TerminalSession>>> {
   TerminalSessionsNotifier() : super({});
 
   void upsert(TerminalSession session) {
@@ -242,20 +286,24 @@ class TerminalSessionsNotifier extends StateNotifier<Map<String, List<TerminalSe
 }
 
 final terminalSessionsProvider =
-    StateNotifierProvider<TerminalSessionsNotifier, Map<String, List<TerminalSession>>>(
-        (ref) => TerminalSessionsNotifier());
+    StateNotifierProvider<
+      TerminalSessionsNotifier,
+      Map<String, List<TerminalSession>>
+    >((ref) => TerminalSessionsNotifier());
 
 /// Sessions for one Run, newest first.
-final terminalSessionsForRunProvider = Provider.family<List<TerminalSession>, String>((ref, runId) {
-  final sessions = ref.watch(terminalSessionsProvider)[runId] ?? const [];
-  return sessions.reversed.toList();
-});
+final terminalSessionsForRunProvider =
+    Provider.family<List<TerminalSession>, String>((ref, runId) {
+      final sessions = ref.watch(terminalSessionsProvider)[runId] ?? const [];
+      return sessions.reversed.toList();
+    });
 
 /// Ephemeral, bounded, per-session output buffer. Never persisted and never
 /// routed through [RunListNotifier.updateRun] — a chatty command can emit
 /// hundreds of lines a second, and neither SQLite nor the Run's `events`
 /// list should absorb that. Only the session summary (see above) is durable.
-class TerminalLiveOutputNotifier extends StateNotifier<Map<String, List<TerminalOutputLine>>> {
+class TerminalLiveOutputNotifier
+    extends StateNotifier<Map<String, List<TerminalOutputLine>>> {
   TerminalLiveOutputNotifier() : super({});
 
   static const _maxBufferedLines = 500;
@@ -270,12 +318,15 @@ class TerminalLiveOutputNotifier extends StateNotifier<Map<String, List<Terminal
 }
 
 final terminalLiveOutputProvider =
-    StateNotifierProvider<TerminalLiveOutputNotifier, Map<String, List<TerminalOutputLine>>>(
-        (ref) => TerminalLiveOutputNotifier());
+    StateNotifierProvider<
+      TerminalLiveOutputNotifier,
+      Map<String, List<TerminalOutputLine>>
+    >((ref) => TerminalLiveOutputNotifier());
 
 // ── Browser Sessions (Phase 3) ────────────────────────────────────────────────
 
-class BrowserSessionsNotifier extends StateNotifier<Map<String, BrowserSession>> {
+class BrowserSessionsNotifier
+    extends StateNotifier<Map<String, BrowserSession>> {
   BrowserSessionsNotifier() : super({});
 
   void upsert(BrowserSession session) {
@@ -293,20 +344,35 @@ class BrowserSessionsNotifier extends StateNotifier<Map<String, BrowserSession>>
 
 final browserSessionsProvider =
     StateNotifierProvider<BrowserSessionsNotifier, Map<String, BrowserSession>>(
-        (ref) => BrowserSessionsNotifier());
+      (ref) => BrowserSessionsNotifier(),
+    );
 
-final browserSessionForRunProvider = Provider.family<BrowserSession?, String>((ref, runId) {
+final browserSessionForRunProvider = Provider.family<BrowserSession?, String>((
+  ref,
+  runId,
+) {
   return ref.watch(browserSessionsProvider)[runId];
 });
 
 // ── Notifications (Phase 3) ───────────────────────────────────────────────────
 
-final notificationServiceProvider = Provider<NotificationService>((ref) => NotificationService());
+final notificationServiceProvider = Provider<NotificationService>(
+  (ref) => NotificationService(),
+);
 
 class NotificationsNotifier extends AsyncNotifier<List<AppNotification>> {
   @override
   Future<List<AppNotification>> build() async {
     final repo = await ref.watch(runRepositoryProvider.future);
+    final bridge = ref.read(bridgeServiceProvider);
+    if (bridge.isReady) {
+      try {
+        final response = await bridge.call('notification.list');
+        return (response['notifications'] as List<dynamic>? ?? [])
+            .map((n) => AppNotification.fromJson(n as Map<String, dynamic>))
+            .toList();
+      } catch (_) {}
+    }
     return repo.getAllNotifications();
   }
 
@@ -319,6 +385,12 @@ class NotificationsNotifier extends AsyncNotifier<List<AppNotification>> {
 
   Future<void> markRead(String id) async {
     final repo = await ref.read(runRepositoryProvider.future);
+    final bridge = ref.read(bridgeServiceProvider);
+    if (bridge.isReady) {
+      try {
+        await bridge.call('notification.mark_read', params: {'id': id});
+      } catch (_) {}
+    }
     await repo.markNotificationRead(id);
     final current = state.valueOrNull ?? [];
     state = AsyncValue.data([
@@ -329,10 +401,13 @@ class NotificationsNotifier extends AsyncNotifier<List<AppNotification>> {
 }
 
 final notificationsProvider =
-    AsyncNotifierProvider<NotificationsNotifier, List<AppNotification>>(NotificationsNotifier.new);
+    AsyncNotifierProvider<NotificationsNotifier, List<AppNotification>>(
+      NotificationsNotifier.new,
+    );
 
 final unreadNotificationCountProvider = Provider<int>((ref) {
-  final notifications = ref.watch(notificationsProvider).valueOrNull ?? const [];
+  final notifications =
+      ref.watch(notificationsProvider).valueOrNull ?? const [];
   return notifications.where((n) => !n.read).length;
 });
 
@@ -343,8 +418,23 @@ class RunListNotifier extends AsyncNotifier<List<Run>> {
   @override
   Future<List<Run>> build() async {
     final repo = await ref.watch(runRepositoryProvider.future);
+    final bridge = ref.read(bridgeServiceProvider);
+    final localRuns = await repo.getAllRuns();
+    List<Run> runtimeRuns = const [];
+    if (bridge.isReady && bridge.databasePath != null) {
+      try {
+        final response = await bridge.call('run.list');
+        runtimeRuns = (response['runs'] as List<dynamic>? ?? [])
+            .map((r) => Run.fromJson(Map<String, dynamic>.from(r as Map)))
+            .toList();
+      } catch (_) {}
+    }
     // Recover any active runs that were interrupted by crash or restart
-    final recovered = await repo.recoverInterruptedRuns();
+    // only when no runtime is connected. A live runtime owns those active
+    // Runs and must never be mistaken for stale Flutter work.
+    final recovered = bridge.isReady
+        ? const <Run>[]
+        : await repo.recoverInterruptedRuns();
     for (final run in recovered) {
       final notification = AppNotification(
         id: 'notif-interrupted-${run.id}-${DateTime.now().microsecondsSinceEpoch}',
@@ -355,13 +445,22 @@ class RunListNotifier extends AsyncNotifier<List<Run>> {
         createdAt: DateTime.now(),
       );
       await repo.saveNotification(notification);
-      await ref.read(notificationServiceProvider).notify(
+      await ref
+          .read(notificationServiceProvider)
+          .notify(
             title: notification.title,
             body: notification.message,
             urgency: 'critical',
           );
     }
-    return repo.getAllRuns();
+    if (runtimeRuns.isEmpty) {
+      return bridge.isReady ? localRuns : await repo.getAllRuns();
+    }
+    final runtimeIds = runtimeRuns.map((r) => r.id).toSet();
+    return [
+      ...runtimeRuns,
+      ...localRuns.where((r) => !runtimeIds.contains(r.id)),
+    ];
   }
 
   Future<Run> createRun(
@@ -381,6 +480,12 @@ class RunListNotifier extends AsyncNotifier<List<Run>> {
       workspacePath: workspacePath,
     );
     await repo.saveRun(run);
+    final bridge = ref.read(bridgeServiceProvider);
+    if (bridge.isReady) {
+      try {
+        await bridge.call('run.create', params: {'run': run.toJson()});
+      } catch (_) {}
+    }
     final current = state.valueOrNull ?? [];
     state = AsyncValue.data([run, ...current]);
     return run;
@@ -403,6 +508,22 @@ class RunListNotifier extends AsyncNotifier<List<Run>> {
     state = AsyncValue.data(await repo.getAllRuns());
   }
 
+  Future<void> refreshFromRuntime() async {
+    final bridge = ref.read(bridgeServiceProvider);
+    if (!bridge.isReady || bridge.databasePath == null) return;
+    final response = await bridge.call('run.list');
+    final runtimeRuns = (response['runs'] as List<dynamic>? ?? [])
+        .map((r) => Run.fromJson(Map<String, dynamic>.from(r as Map)))
+        .toList();
+    if (runtimeRuns.isEmpty) return;
+    final local = state.valueOrNull ?? const <Run>[];
+    final ids = runtimeRuns.map((r) => r.id).toSet();
+    state = AsyncValue.data([
+      ...runtimeRuns,
+      ...local.where((r) => !ids.contains(r.id)),
+    ]);
+  }
+
   static String _generateId() {
     final now = DateTime.now();
     final ms = now.millisecondsSinceEpoch;
@@ -410,8 +531,9 @@ class RunListNotifier extends AsyncNotifier<List<Run>> {
   }
 }
 
-final runListProvider =
-    AsyncNotifierProvider<RunListNotifier, List<Run>>(RunListNotifier.new);
+final runListProvider = AsyncNotifierProvider<RunListNotifier, List<Run>>(
+  RunListNotifier.new,
+);
 
 /// Provides a single Run by ID.
 final runByIdProvider = Provider.family<Run?, String>((ref, id) {
@@ -452,7 +574,8 @@ final pendingApprovalsProvider = Provider<List<ApprovalRequest>>((ref) {
 /// Executes a Run and streams events back to update the Run's state.
 class RunExecutor {
   final Ref _ref;
-  final Map<String, StreamSubscription<Map<String, dynamic>>> _subscriptions = {};
+  final Map<String, StreamSubscription<Map<String, dynamic>>> _subscriptions =
+      {};
 
   RunExecutor(this._ref);
 
@@ -470,30 +593,38 @@ class RunExecutor {
     if (!bridge.isReady) return;
 
     // Transition to planning
-    await _updateRun(run.copyWith(
-      status: RunStatus.planning,
-      startedAt: DateTime.now(),
-      events: run.events,
-    ));
+    await _updateRun(
+      run.copyWith(
+        status: RunStatus.planning,
+        startedAt: DateTime.now(),
+        events: run.events,
+      ),
+    );
 
-    final stream = bridge.callStreaming('execute_run', params: {
-      'run_id': runId,
-      'goal': run.goal,
-      if (run.providerId != null) 'provider': run.providerId,
-      if (run.modelId != null) 'model': run.modelId,
-      if (run.workspacePath != null) 'workspace_root': run.workspacePath,
-    });
+    final stream = bridge.callStreaming(
+      'execute_run',
+      params: {
+        'run_id': runId,
+        'goal': run.goal,
+        if (bridge.databasePath == null) 'legacy_direct': true,
+        if (run.providerId != null) 'provider': run.providerId,
+        if (run.modelId != null) 'model': run.modelId,
+        if (run.workspacePath != null) 'workspace_root': run.workspacePath,
+      },
+    );
 
     final sub = stream.listen(
       (event) => _handleEvent(runId, event),
       onError: (e) async {
         final current = _ref.read(runByIdProvider(runId));
         if (current != null) {
-          await _updateRun(current.copyWith(
-            status: RunStatus.failed,
-            errorMessage: e.toString(),
-            completedAt: DateTime.now(),
-          ));
+          await _updateRun(
+            current.copyWith(
+              status: RunStatus.failed,
+              errorMessage: e.toString(),
+              completedAt: DateTime.now(),
+            ),
+          );
         }
       },
       onDone: () {
@@ -504,8 +635,37 @@ class RunExecutor {
     _subscriptions[runId] = sub;
   }
 
+  /// Reattaches live event streams after a UI reconnect. The runtime keeps
+  /// executing independently; the cursor makes this a replay-plus-live
+  /// subscription rather than a second execution request.
+  Future<void> reconnectActiveRuns() async {
+    final runs = _ref.read(runListProvider).valueOrNull ?? const <Run>[];
+    final bridge = _ref.read(bridgeServiceProvider);
+    if (!bridge.isReady) return;
+    for (final run in runs.where((r) => !r.isTerminal)) {
+      if (_subscriptions.containsKey(run.id)) continue;
+      final lastEventId = run.events.fold<int>(0, (max, event) {
+        final value = event.data?['event_id'];
+        return value is int && value > max ? value : max;
+      });
+      final stream = bridge.callStreaming(
+        'events.subscribe',
+        params: {'run_id': run.id, 'after_event_id': lastEventId},
+      );
+      _subscriptions[run.id] = stream.listen(
+        (event) => _handleEvent(run.id, event),
+        onError: (_) => _subscriptions.remove(run.id),
+        onDone: () => _subscriptions.remove(run.id),
+      );
+    }
+  }
+
   /// Resolves an interactive approval request.
-  Future<void> resolveApproval(String runId, String requestId, bool approved) async {
+  Future<void> resolveApproval(
+    String runId,
+    String requestId,
+    bool approved,
+  ) async {
     final bridge = _ref.read(bridgeServiceProvider);
     await bridge.resolveApproval(requestId, approved);
 
@@ -555,11 +715,13 @@ class RunExecutor {
     await bridge.cancelRun(runId);
     final current = _ref.read(runByIdProvider(runId));
     if (current != null) {
-      await _updateRun(current.copyWith(
-        status: RunStatus.cancelled,
-        completedAt: DateTime.now(),
-        outcome: 'Run cancelled by user.',
-      ));
+      await _updateRun(
+        current.copyWith(
+          status: RunStatus.cancelled,
+          completedAt: DateTime.now(),
+          outcome: 'Run cancelled by user.',
+        ),
+      );
     }
     await _subscriptions[runId]?.cancel();
     _subscriptions.remove(runId);
@@ -575,10 +737,12 @@ class RunExecutor {
       timestamp: DateTime.now(),
       message: 'Resuming execution from last checkpoint.',
     );
-    await _updateRun(current.copyWith(
-      status: RunStatus.running,
-      events: [...current.events, resumeEvent],
-    ));
+    await _updateRun(
+      current.copyWith(
+        status: RunStatus.running,
+        events: [...current.events, resumeEvent],
+      ),
+    );
 
     await execute(runId);
   }
@@ -586,6 +750,14 @@ class RunExecutor {
   Future<void> _handleEvent(String runId, Map<String, dynamic> event) async {
     final current = _ref.read(runByIdProvider(runId));
     if (current == null) return;
+
+    // Runtime event IDs are stable across disconnect/reconnect. Ignore a
+    // replayed cursor that the UI already applied.
+    final replayId = event['event_id'];
+    if (replayId is int &&
+        current.events.any((e) => e.data?['event_id'] == replayId)) {
+      return;
+    }
 
     final type = event['type'] as String? ?? '';
     final message = event['message'] as String? ?? '';
@@ -600,7 +772,9 @@ class RunExecutor {
     if (type == 'terminal.output') {
       final sessionId = event['session_id'] as String?;
       if (sessionId != null) {
-        _ref.read(terminalLiveOutputProvider.notifier).appendLine(
+        _ref
+            .read(terminalLiveOutputProvider.notifier)
+            .appendLine(
               sessionId,
               TerminalOutputLine(
                 stream: event['stream'] as String? ?? 'stdout',
@@ -617,8 +791,16 @@ class RunExecutor {
     // own durable summaries in addition to flowing into `run.events` below
     // like any other event (these are low-frequency: one per command or
     // navigation, not per line).
-    if (type == 'terminal.session.created' || type == 'terminal.session.completed') {
-      await _handleTerminalSessionEvent(runId, taskId, type, event, timestamp, repo);
+    if (type == 'terminal.session.created' ||
+        type == 'terminal.session.completed') {
+      await _handleTerminalSessionEvent(
+        runId,
+        taskId,
+        type,
+        event,
+        timestamp,
+        repo,
+      );
     } else if (type.startsWith('browser.')) {
       await _handleBrowserEvent(runId, type, event, timestamp, repo);
     } else if (type == 'computer.action.requested') {
@@ -626,7 +808,9 @@ class RunExecutor {
       // the result back over the bridge, which is what unblocks the
       // Python capability handler still waiting on the other end. It must
       // not block this event-stream listener itself.
-      unawaited(_handleComputerActionRequested(current, taskId, event, timestamp, repo));
+      unawaited(
+        _handleComputerActionRequested(current, taskId, event, timestamp, repo),
+      );
     }
 
     // 1. Create structured RunEvent
@@ -634,7 +818,9 @@ class RunExecutor {
       type: type,
       timestamp: timestamp,
       message: message,
-      data: Map<String, dynamic>.from(event)..remove('type')..remove('message'),
+      data: Map<String, dynamic>.from(event)
+        ..remove('type')
+        ..remove('message'),
       taskId: taskId,
     );
 
@@ -646,7 +832,9 @@ class RunExecutor {
     // 2. Handle Phase 2 specific events
     if (type == 'approval.requested') {
       final req = ApprovalRequest(
-        id: event['request_id'] as String? ?? 'appr-$runId-${DateTime.now().millisecondsSinceEpoch}',
+        id:
+            event['request_id'] as String? ??
+            'appr-$runId-${DateTime.now().millisecondsSinceEpoch}',
         runId: runId,
         taskId: taskId,
         capabilityId: event['capability_id'] as String? ?? '',
@@ -684,7 +872,9 @@ class RunExecutor {
       );
     } else if (type == 'artifact.created') {
       final art = Artifact(
-        id: event['artifact_id'] as String? ?? 'art-$runId-${DateTime.now().millisecondsSinceEpoch}',
+        id:
+            event['artifact_id'] as String? ??
+            'art-$runId-${DateTime.now().millisecondsSinceEpoch}',
         runId: runId,
         taskId: taskId,
         type: ArtifactType.fromString(event['type'] as String?),
@@ -695,9 +885,7 @@ class RunExecutor {
         createdAt: timestamp,
       );
       await repo.saveArtifact(art);
-      updated = updated.copyWith(
-        artifacts: [...updated.artifacts, art],
-      );
+      updated = updated.copyWith(artifacts: [...updated.artifacts, art]);
     } else if (type == 'checkpoint.created') {
       final chk = RunCheckpoint(
         id: 'chk-$runId-${event['step_index'] ?? 0}',
@@ -712,7 +900,10 @@ class RunExecutor {
       updated = updated.copyWith(
         plan: [
           for (final t in updated.plan)
-            if (t.id == taskId) t.copyWith(attempts: attempt, status: 'running') else t,
+            if (t.id == taskId)
+              t.copyWith(attempts: attempt, status: 'running')
+            else
+              t,
         ],
       );
     } else if (type == 'model.selected') {
@@ -742,31 +933,31 @@ class RunExecutor {
     updated = switch (type) {
       'planning.started' => updated.copyWith(status: RunStatus.planning),
       'planning.completed' => updated.copyWith(
-          status: RunStatus.ready,
-          plan: _buildPlan(event, current.plan),
-        ),
+        status: RunStatus.ready,
+        plan: _buildPlan(event, current.plan),
+      ),
       'run.started' => updated.copyWith(status: RunStatus.running),
       'task.started' => updated.copyWith(
-          status: RunStatus.running,
-          plan: _updateTaskStatus(current.plan, taskId, 'running'),
-        ),
+        status: RunStatus.running,
+        plan: _updateTaskStatus(current.plan, taskId, 'running'),
+      ),
       'task.completed' => updated.copyWith(
-          plan: _updateTaskStatus(current.plan, taskId, 'completed'),
-        ),
+        plan: _updateTaskStatus(current.plan, taskId, 'completed'),
+      ),
       'task.failed' => updated.copyWith(
-          plan: _updateTaskStatus(current.plan, taskId, 'failed'),
-        ),
+        plan: _updateTaskStatus(current.plan, taskId, 'failed'),
+      ),
       'verification.started' => updated.copyWith(status: RunStatus.verifying),
       'run.completed' => updated.copyWith(
-          status: RunStatus.completed,
-          completedAt: timestamp,
-          outcome: event['outcome'] as String? ?? message,
-        ),
+        status: RunStatus.completed,
+        completedAt: timestamp,
+        outcome: event['outcome'] as String? ?? message,
+      ),
       'run.failed' => updated.copyWith(
-          status: RunStatus.failed,
-          completedAt: timestamp,
-          errorMessage: message,
-        ),
+        status: RunStatus.failed,
+        completedAt: timestamp,
+        errorMessage: message,
+      ),
       _ => updated,
     };
 
@@ -800,6 +991,10 @@ class RunExecutor {
     String? runId,
     String urgency = 'normal',
   }) async {
+    // The canonical runtime persists and produces native notifications. The
+    // Flutter-side copy is retained only for isolated/legacy repositories.
+    final bridge = _ref.read(bridgeServiceProvider);
+    if (bridge.isReady && bridge.databasePath != null) return;
     final notification = AppNotification(
       id: 'notif-${DateTime.now().microsecondsSinceEpoch}',
       type: type,
@@ -809,7 +1004,9 @@ class RunExecutor {
       createdAt: DateTime.now(),
     );
     await _ref.read(notificationsProvider.notifier).add(notification);
-    await _ref.read(notificationServiceProvider).notify(title: title, body: message, urgency: urgency);
+    await _ref
+        .read(notificationServiceProvider)
+        .notify(title: title, body: message, urgency: urgency);
   }
 
   Future<void> _handleTerminalSessionEvent(
@@ -842,24 +1039,27 @@ class RunExecutor {
     } else {
       final timedOut = event['timed_out'] as bool? ?? false;
       final success = event['success'] as bool? ?? false;
-      session = (existing ??
-              TerminalSession(
-                id: sessionId,
-                runId: runId,
-                taskId: taskId,
-                command: '',
-                cwd: '.',
-                status: TerminalSessionStatus.running,
-                startedAt: timestamp,
-              ))
-          .copyWith(
-        status: timedOut
-            ? TerminalSessionStatus.timedOut
-            : (success ? TerminalSessionStatus.completed : TerminalSessionStatus.failed),
-        exitCode: event['exit_code'] as int?,
-        truncated: event['truncated'] as bool? ?? false,
-        completedAt: timestamp,
-      );
+      session =
+          (existing ??
+                  TerminalSession(
+                    id: sessionId,
+                    runId: runId,
+                    taskId: taskId,
+                    command: '',
+                    cwd: '.',
+                    status: TerminalSessionStatus.running,
+                    startedAt: timestamp,
+                  ))
+              .copyWith(
+                status: timedOut
+                    ? TerminalSessionStatus.timedOut
+                    : (success
+                          ? TerminalSessionStatus.completed
+                          : TerminalSessionStatus.failed),
+                exitCode: event['exit_code'] as int?,
+                truncated: event['truncated'] as bool? ?? false,
+                completedAt: timestamp,
+              );
     }
 
     _ref.read(terminalSessionsProvider.notifier).upsert(session);
@@ -876,7 +1076,8 @@ class RunExecutor {
     final sessionId = event['session_id'] as String?;
     if (sessionId == null) return;
 
-    final existing = _ref.read(browserSessionsProvider)[runId] ??
+    final existing =
+        _ref.read(browserSessionsProvider)[runId] ??
         BrowserSession(id: sessionId, runId: runId, updatedAt: timestamp);
 
     BrowserSession updated = existing;
@@ -898,9 +1099,15 @@ class RunExecutor {
           updatedAt: timestamp,
         );
       case 'browser.download.completed':
-        updated = existing.copyWith(downloadCount: existing.downloadCount + 1, updatedAt: timestamp);
+        updated = existing.copyWith(
+          downloadCount: existing.downloadCount + 1,
+          updatedAt: timestamp,
+        );
       case 'browser.capture.created':
-        updated = existing.copyWith(captureCount: existing.captureCount + 1, updatedAt: timestamp);
+        updated = existing.copyWith(
+          captureCount: existing.captureCount + 1,
+          updatedAt: timestamp,
+        );
       default:
         updated = existing.copyWith(updatedAt: timestamp);
     }
@@ -931,7 +1138,10 @@ class RunExecutor {
     String? capturePath;
 
     if (targetId != ComputerTarget.sysaiTestSurface.id) {
-      result = {'success': false, 'error': 'Unregistered computer target: $targetId'};
+      result = {
+        'success': false,
+        'error': 'Unregistered computer target: $targetId',
+      };
     } else {
       final controller = _ref.read(testSurfaceControllerProvider.notifier);
       final selector = event['selector'] as String?;
@@ -941,22 +1151,37 @@ class RunExecutor {
         case 'click':
           result = controller.executeClick(selector);
         case 'type':
-          result = controller.executeType(selector, event['text_metadata'] as String?);
+          result = controller.executeType(
+            selector,
+            event['text_metadata'] as String?,
+          );
         case 'key':
-          result = controller.executeKey(selector, event['text_metadata'] as String?);
+          result = controller.executeKey(
+            selector,
+            event['text_metadata'] as String?,
+          );
         case 'scroll':
-          result = controller.executeScroll(selector, event['text_metadata'] as String?);
+          result = controller.executeScroll(
+            selector,
+            event['text_metadata'] as String?,
+          );
         case 'capture':
           final pngBytes = await captureBoundaryPng(testSurfaceRepaintKey);
           if (pngBytes == null) {
             result = {
               'success': false,
-              'reason': 'The Computer test surface is not currently rendered — open the Computer view '
+              'reason':
+                  'The Computer test surface is not currently rendered — open the Computer view '
                   'in SysAI OS so the capture has something to render from.',
             };
           } else {
-            final workspaceRoot = run.workspacePath ?? SysAIConfig.defaultWorkspacePath;
-            capturePath = await saveCapture(workspaceRoot, pngBytes, prefix: 'computer');
+            final workspaceRoot =
+                run.workspacePath ?? SysAIConfig.defaultWorkspacePath;
+            capturePath = await saveCapture(
+              workspaceRoot,
+              pngBytes,
+              prefix: 'computer',
+            );
             result = {
               'success': true,
               'path': capturePath,
@@ -969,7 +1194,10 @@ class RunExecutor {
             };
           }
         default:
-          result = {'success': false, 'error': 'Unsupported action type: $actionTypeStr'};
+          result = {
+            'success': false,
+            'error': 'Unsupported action type: $actionTypeStr',
+          };
       }
     }
 
@@ -983,58 +1211,72 @@ class RunExecutor {
       selector: event['selector'] as String?,
       coordinates: event['coordinates'] as Map<String, dynamic>?,
       textMetadata: event['text_metadata'] as String?,
-      status: (result['success'] as bool? ?? false) ? ComputerActionStatus.completed : ComputerActionStatus.failed,
+      status: (result['success'] as bool? ?? false)
+          ? ComputerActionStatus.completed
+          : ComputerActionStatus.failed,
       requestedAt: timestamp,
       startedAt: timestamp,
       completedAt: DateTime.now(),
       result: result,
-      failure: (result['success'] as bool? ?? false) ? null : (result['error'] as String? ?? result['reason'] as String?),
+      failure: (result['success'] as bool? ?? false)
+          ? null
+          : (result['error'] as String? ?? result['reason'] as String?),
     );
     await repo.saveComputerAction(action);
 
     final existingSession = await repo.getComputerSessionForRun(run.id);
-    final session = (existingSession ??
-            ComputerSession(
-              id: 'comp-${run.id}',
-              runId: run.id,
-              targetId: targetId,
-              targetTitle: ComputerTarget.sysaiTestSurface.title,
-              updatedAt: timestamp,
-            ))
-        .copyWith(
-      latestCapturePath: capturePath,
-      actionCount: (existingSession?.actionCount ?? 0) + 1,
-      updatedAt: DateTime.now(),
-    );
+    final session =
+        (existingSession ??
+                ComputerSession(
+                  id: 'comp-${run.id}',
+                  runId: run.id,
+                  targetId: targetId,
+                  targetTitle: ComputerTarget.sysaiTestSurface.title,
+                  updatedAt: timestamp,
+                ))
+            .copyWith(
+              latestCapturePath: capturePath,
+              actionCount: (existingSession?.actionCount ?? 0) + 1,
+              updatedAt: DateTime.now(),
+            );
     await repo.saveComputerSession(session);
 
     // Unblocks the Python capability handler still waiting on the other
     // end of ComputerActionManager.wait_for_result().
-    await _ref.read(bridgeServiceProvider).reportComputerActionResult(requestId, result);
+    await _ref
+        .read(bridgeServiceProvider)
+        .reportComputerActionResult(requestId, result);
   }
 
   List<RunTask> _buildPlan(Map<String, dynamic> event, List<RunTask> current) {
     final planData = event['plan'] as List<dynamic>?;
     if (planData == null) return current;
     return planData
-        .map((t) => RunTask(
-              id: t['id'] as String? ?? '',
-              title: t['title'] as String? ?? '',
-              description: t['description'] as String? ?? '',
-              dependencies: (t['dependencies'] as List<dynamic>?)
-                      ?.map((e) => e.toString())
-                      .toList() ??
-                  const [],
-              capabilityHints: (t['capability_hints'] as List<dynamic>?)
-                      ?.map((e) => e.toString())
-                      .toList() ??
-                  const [],
-            ))
+        .map(
+          (t) => RunTask(
+            id: t['id'] as String? ?? '',
+            title: t['title'] as String? ?? '',
+            description: t['description'] as String? ?? '',
+            dependencies:
+                (t['dependencies'] as List<dynamic>?)
+                    ?.map((e) => e.toString())
+                    .toList() ??
+                const [],
+            capabilityHints:
+                (t['capability_hints'] as List<dynamic>?)
+                    ?.map((e) => e.toString())
+                    .toList() ??
+                const [],
+          ),
+        )
         .toList();
   }
 
   List<RunTask> _updateTaskStatus(
-      List<RunTask> plan, String? taskId, String status) {
+    List<RunTask> plan,
+    String? taskId,
+    String status,
+  ) {
     if (taskId == null) return plan;
     return [
       for (final t in plan)
@@ -1072,7 +1314,10 @@ class ExperienceNotifier extends AsyncNotifier<Map<String, dynamic>> {
     }
     try {
       final stats = await bridge.call('get_memory_stats');
-      final memories = await bridge.call('list_memories', params: {'limit': 50});
+      final memories = await bridge.call(
+        'list_memories',
+        params: {'limit': 50},
+      );
       return {
         'available': true,
         'stats': stats,
@@ -1091,4 +1336,5 @@ class ExperienceNotifier extends AsyncNotifier<Map<String, dynamic>> {
 
 final experienceProvider =
     AsyncNotifierProvider<ExperienceNotifier, Map<String, dynamic>>(
-        ExperienceNotifier.new);
+      ExperienceNotifier.new,
+    );

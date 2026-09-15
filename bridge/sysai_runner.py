@@ -390,6 +390,7 @@ def execute_run(
     workspace_root: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    computer_target_available: Optional[Callable[[str], bool]] = None,
 ) -> None:
     """
     Executes a Run using the Phase 2 agentic architecture:
@@ -428,7 +429,13 @@ def execute_run(
                 if not avail_models:
                     avail_models = [m for m in discovered if m.get("available")]
                 if avail_models:
-                    target_model = avail_models[0]["id"]
+                    selected = avail_models[0]
+                    target_model = str(selected.get("name") or selected.get("id", ""))
+                    # Discovery IDs are namespaced for the UI (for example
+                    # ``ollama:llama3``), while the provider API expects the
+                    # provider-native model name.
+                    if target_model.startswith(f"{target_provider}:"):
+                        target_model = target_model.split(":", 1)[1]
                 else:
                     target_model = base_cfg.model
 
@@ -449,10 +456,11 @@ def execute_run(
         import dataclasses
         run_config = dataclasses.replace(base_cfg, provider=target_provider, model=target_model)
     except ImportError:
-        if not target_provider:
-            target_provider = "ollama"
-        if not target_model:
-            target_model = "qwen3:8b"
+        # The runtime cannot safely invent a provider/model when SysAI is not
+        # installed. Keep the selection empty and let the normal unavailable
+        # model path report an actionable configuration error.
+        target_provider = target_provider.strip()
+        target_model = target_model.strip()
 
     # Emit model.selected structured event (safe, no secrets leaked)
     emit_ev(
@@ -481,6 +489,12 @@ def execute_run(
         "run_config": run_config,
         "provider": target_provider,
         "model": target_model,
+        # The persistent runtime supplies this callback so a controlled
+        # Computer action can wait honestly for its Flutter-owned target to
+        # remount after a UI disconnect. Direct bridge callers keep the
+        # Phase 4 behavior when no callback is supplied.
+        "computer_target_available": computer_target_available,
+        "is_cancelled": lambda: EXECUTION_CONTROLLER.is_cancelled(run_id),
     }
 
     step_index = 0

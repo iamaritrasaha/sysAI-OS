@@ -2,9 +2,9 @@
 """
 SysAI_OS Bridge Server — Phase 2
 ================================
-Communicates with the Flutter desktop app via stdin/stdout using
-newline-delimited JSON (NDJSON). Each line in is a request dict,
-each line out is a response dict.
+The legacy adapter communicates over stdin/stdout using newline-delimited JSON
+(NDJSON). The production runtime imports this adapter in-process and exposes
+the same request/response handlers over its local Unix-domain-socket protocol.
 
 The bridge imports SysAI modules directly using the path configured
 via SYSAI_PATH (environment variable or .sysai_path file in project root).
@@ -172,7 +172,27 @@ def handle_get_doctor(req_id: str, params: dict) -> dict:
         return _unavailable(req_id)
     try:
         probe = params.get("probe_model", False)
-        result = run_doctor(probe_model=probe)
+        configured = load_config()
+        effective = configured
+        # Keep SysAI's config file untouched, but make the OS health surface
+        # report the live provider state rather than a stale unavailable
+        # default. The selected model is used for this diagnostic snapshot
+        # only; execution applies the same dynamic selection policy.
+        configured_available, _ = _check_model_available(
+            configured.provider, configured.model, configured
+        )
+        if not configured_available:
+            for candidate in _discover_models(configured):
+                if candidate.get("available"):
+                    effective = dataclasses.replace(
+                        configured,
+                        provider=str(candidate["provider"]),
+                        model=str(candidate["name"]),
+                    )
+                    break
+        result = run_doctor(effective, probe_model=probe)
+        result["configured_model"] = configured.model
+        result["effective_model"] = effective.model
         return _ok(req_id, result)
     except Exception as exc:
         return _err(req_id, f"Doctor failed: {exc}")
@@ -444,24 +464,28 @@ def _discover_models(cfg: Any) -> list[dict]:
         pass
 
     # 2. Configured active model from SysAI
-    active_provider = cfg.provider
-    active_model = cfg.model
+    # Do not turn a stale/unavailable engine default into a selectable model.
+    # The engine remains the source of truth for configuration; the UI should
+    # show models that are actually discoverable and available right now.
+    active_provider = str(getattr(cfg, "provider", "") or "").strip()
+    active_model = str(getattr(cfg, "model", "") or "").strip()
     active_id = f"{active_provider}:{active_model}"
-    if active_id not in seen_ids:
-        avail, reason = _check_model_available(active_provider, active_model, cfg)
-        seen_ids.add(active_id)
-        models.append({
-            "id": active_id,
-            "name": active_model,
-            "provider": active_provider,
-            "display_name": f"{active_model} (configured)",
-            "available": avail,
-            "unavailable_reason": reason if not avail else None,
-            "context_window": None,
-            "capabilities": ["streaming"],
-            "local": active_provider == "ollama",
-            "metadata": {"configured": True},
-        })
+    if active_provider and active_model and active_id not in seen_ids:
+        avail, _reason = _check_model_available(active_provider, active_model, cfg)
+        if avail:
+            seen_ids.add(active_id)
+            models.append({
+                "id": active_id,
+                "name": active_model,
+                "provider": active_provider,
+                "display_name": f"{active_model} (configured)",
+                "available": True,
+                "unavailable_reason": None,
+                "context_window": None,
+                "capabilities": ["streaming"],
+                "local": active_provider == "ollama",
+                "metadata": {"configured": True},
+            })
 
     # 3. Ollama Cloud models if configured
     cloud_key = os.environ.get("OLLAMA_API_KEY", "") or load_private_env().get("OLLAMA_API_KEY", "")

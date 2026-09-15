@@ -13,6 +13,7 @@ import '../theme/status.dart';
 import '../theme/tokens.dart';
 import '../theme/typography.dart';
 import '../widgets/model_selector.dart';
+import '../widgets/markdown_preview.dart';
 
 class HomeView extends ConsumerStatefulWidget {
   final void Function(String runId) onRunCreated;
@@ -510,6 +511,11 @@ class _TargetChip extends StatelessWidget {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     return InkWell(
       onTap: onTap,
+      overlayColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.pressed)) return onSurface.withAlpha(24);
+        if (states.contains(WidgetState.hovered)) return onSurface.withAlpha(10);
+        return null;
+      }),
       borderRadius: BorderRadius.circular(6),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -660,6 +666,11 @@ class _ActiveRunCard extends StatelessWidget {
 
     return InkWell(
       onTap: onTap,
+      overlayColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.pressed)) return primary.withAlpha(32);
+        if (states.contains(WidgetState.hovered)) return primary.withAlpha(16);
+        return null;
+      }),
       borderRadius: BorderRadius.circular(8),
       child: Container(
         margin: const EdgeInsets.only(bottom: Space.sm),
@@ -749,6 +760,11 @@ class _RecentRunRow extends StatelessWidget {
 
     return InkWell(
       onTap: onTap,
+      overlayColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.pressed)) return onSurface.withAlpha(22);
+        if (states.contains(WidgetState.hovered)) return onSurface.withAlpha(8);
+        return null;
+      }),
       borderRadius: BorderRadius.circular(8),
       child: Container(
         margin: const EdgeInsets.only(bottom: 6),
@@ -778,14 +794,12 @@ class _RecentRunRow extends StatelessWidget {
                   ),
                   if (run.outcome.isNotEmpty) ...[
                     const SizedBox(height: 2),
-                    Text(
-                      run.outcome.split('\n').first,
+                    MarkdownPreview(
+                      data: run.outcome,
                       style: TextStyle(
                         fontSize: 11,
                         color: onSurface.withAlpha(120),
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                     ),
                   ],
                 ],

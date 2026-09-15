@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/run.dart';
 import '../providers/app_providers.dart';
 import '../theme/status.dart';
+import '../widgets/markdown_preview.dart';
 import 'run_detail_view.dart';
 import 'shell.dart';
 
@@ -334,14 +335,12 @@ class _RunListItem extends StatelessWidget {
                   ),
                   if (run.outcome.isNotEmpty) ...[
                     const SizedBox(height: 4),
-                    Text(
-                      run.outcome.split('\n').first,
+                    MarkdownPreview(
+                      data: run.outcome,
                       style: TextStyle(
                         fontSize: 12,
                         color: onSurface.withAlpha(130),
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                     ),
                   ],
                   if (run.plan.isNotEmpty) ...[

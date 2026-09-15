@@ -12,7 +12,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/run.dart';
+import '../models/computer_target.dart';
 import '../providers/app_providers.dart';
+import '../services/bridge_service.dart';
 import '../services/test_surface_controller.dart';
 import '../services/view_capture_service.dart';
 import '../theme/tokens.dart';
@@ -28,6 +30,42 @@ class ComputerView extends ConsumerStatefulWidget {
 class _ComputerViewState extends ConsumerState<ComputerView> {
   Uint8List? _lastCapture;
   String? _selectedRunId;
+  BridgeService? _bridge;
+
+  @override
+  void initState() {
+    super.initState();
+    _bridge = ref.read(bridgeServiceProvider);
+    ref.listenManual(bridgeStatusProvider, (previous, next) {
+      if (next.valueOrNull == BridgeStatus.connected) {
+        _registerTarget();
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _registerTarget());
+  }
+
+  void _registerTarget() {
+    if (!mounted) return;
+    final bridge = _bridge;
+    if (bridge != null && bridge.isReady) {
+      bridge.registerComputerTarget(
+        ComputerTarget.sysaiTestSurface.id,
+        capabilities: {
+          'actions': ComputerTarget.sysaiTestSurface.allowedActions,
+        },
+        metadata: {'title': ComputerTarget.sysaiTestSurface.title},
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    final bridge = _bridge;
+    if (bridge != null && bridge.isReady) {
+      bridge.unregisterComputerTarget(ComputerTarget.sysaiTestSurface.id);
+    }
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

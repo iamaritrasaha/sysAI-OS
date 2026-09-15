@@ -28,6 +28,7 @@ dependencies:
   path: ^1.9.1
   uuid: ^4.5.1
   intl: ^0.20.1
+  flutter_markdown_plus: ^1.0.3
 
   # DST-safe IANA timezone math for the Scheduler (Phase 4)
   timezone: ^0.10.0

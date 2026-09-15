@@ -1,20 +1,15 @@
-/// SchedulerService — the entire "background" story for Phase 4.
+/// SchedulerService is now a compatibility facade for the persistent runtime.
 ///
-/// A single central [Timer.periodic] (never one timer per automation)
-/// checks for due [ScheduledAutomation]s and fires them by creating a
-/// normal [Run] through the exact same pipeline a user-initiated Run goes
-/// through (`runListProvider.notifier.createRun()` +
-/// `runExecutorProvider.execute()`). There is no second execution engine
-/// here — only scheduling logic on top of the existing one.
-///
-/// Lifecycle: active only while this process is alive. Closing the SysAI
-/// OS window (if the app fully exits) stops the timer along with
-/// everything else — see `docs/lifecycle.md`.
+/// The Python runtime owns the production scheduler and its durable claim
+/// loop. This service retains the local scheduler path for isolated tests and
+/// non-canonical repositories, but never starts a background timer in the UI.
+/// That keeps Flutter teardown from owning background execution.
 library;
 
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 
 import '../models/notification.dart';
 import '../models/run.dart';
@@ -30,9 +25,6 @@ import 'schedule_calculator.dart';
 /// *is* the entire "missed one-time automation" policy — deterministic and
 /// documented, per the Phase 4 brief.
 const Duration kOnceGraceWindow = Duration(minutes: 15);
-
-/// How often the central timer checks for due automations.
-const Duration kSchedulerTickInterval = Duration(seconds: 30);
 
 /// Whether a *successful* automation firing also raises a desktop
 /// notification (failures and missed automations always do, regardless of
@@ -57,8 +49,21 @@ class SchedulerService {
 
   Future<RunRepository> _repo() => _ref.read(runRepositoryProvider.future);
 
-  /// Starts the central timer and runs one immediate catch-up pass — this
-  /// pass is what catches "the app wasn't running at the scheduled time."
+  Future<bool> _runtimeOwned() async {
+    final bridge = _ref.read(bridgeServiceProvider);
+    if (!bridge.isReady) return false;
+    final repo = await _repo();
+    String canonical;
+    try {
+      canonical = await getDefaultDbPath();
+    } catch (_) {
+      return false;
+    }
+    return p.normalize(repo.databasePath) == p.normalize(canonical);
+  }
+
+  /// Starts the compatibility facade and runs one immediate catch-up pass.
+  /// Production recurring work is driven by the persistent runtime.
   void start() {
     if (!_listening) {
       _listening = true;
@@ -79,7 +84,6 @@ class SchedulerService {
       });
     }
     unawaited(processDueAutomations());
-    _timer ??= Timer.periodic(kSchedulerTickInterval, (_) => processDueAutomations());
   }
 
   void dispose() {
@@ -117,18 +121,77 @@ class SchedulerService {
     final next = scheduleType == AutomationScheduleType.once
         ? onceAtUtc
         : computeNextTrigger(automation, DateTime.now().toUtc());
-    automation = automation.copyWith(nextTriggerAt: next, clearNextTriggerAt: next == null);
+    automation = automation.copyWith(
+      nextTriggerAt: next,
+      clearNextTriggerAt: next == null,
+    );
+    if (await _runtimeOwned()) {
+      final response = await _ref
+          .read(bridgeServiceProvider)
+          .call(
+            'automation.create',
+            params: {'automation': automation.toJson()},
+          );
+      return ScheduledAutomation.fromJson(
+        response['automation'] as Map<String, dynamic>,
+      );
+    }
     await repo.saveAutomation(automation);
     return automation;
   }
 
   Future<void> update(ScheduledAutomation automation) async {
     final repo = await _repo();
-    await repo.saveAutomation(automation.copyWith(updatedAt: DateTime.now().toUtc()));
+    if (await _runtimeOwned()) {
+      await _ref
+          .read(bridgeServiceProvider)
+          .call(
+            'automation.update',
+            params: {
+              'automation': automation
+                  .copyWith(updatedAt: DateTime.now().toUtc())
+                  .toJson(),
+            },
+          );
+      return;
+    }
+    await repo.saveAutomation(
+      automation.copyWith(updatedAt: DateTime.now().toUtc()),
+    );
   }
 
   Future<void> setEnabled(String id, bool enabled) async {
     final repo = await _repo();
+    if (await _runtimeOwned()) {
+      final response = await _ref
+          .read(bridgeServiceProvider)
+          .call('automation.list');
+      final values = (response['automations'] as List<dynamic>? ?? []).map(
+        (v) => ScheduledAutomation.fromJson(v as Map<String, dynamic>),
+      );
+      final automation = values.where((a) => a.id == id).firstOrNull;
+      if (automation == null) return;
+      DateTime? next = automation.nextTriggerAt;
+      if (enabled && automation.scheduleType != AutomationScheduleType.once) {
+        next = computeNextTrigger(automation, DateTime.now().toUtc());
+      }
+      await _ref
+          .read(bridgeServiceProvider)
+          .call(
+            'automation.update',
+            params: {
+              'automation': automation
+                  .copyWith(
+                    enabled: enabled,
+                    nextTriggerAt: next,
+                    clearNextTriggerAt: next == null,
+                    updatedAt: DateTime.now().toUtc(),
+                  )
+                  .toJson(),
+            },
+          );
+      return;
+    }
     final automation = await repo.getAutomation(id);
     if (automation == null) return;
     // Re-enabling a schedule that has fallen behind (or was created
@@ -138,20 +201,38 @@ class SchedulerService {
     if (enabled && automation.scheduleType != AutomationScheduleType.once) {
       next = computeNextTrigger(automation, DateTime.now().toUtc());
     }
-    await repo.saveAutomation(automation.copyWith(
-      enabled: enabled,
-      nextTriggerAt: next,
-      clearNextTriggerAt: next == null,
-      updatedAt: DateTime.now().toUtc(),
-    ));
+    await repo.saveAutomation(
+      automation.copyWith(
+        enabled: enabled,
+        nextTriggerAt: next,
+        clearNextTriggerAt: next == null,
+        updatedAt: DateTime.now().toUtc(),
+      ),
+    );
   }
 
   Future<void> delete(String id) async {
     final repo = await _repo();
+    if (await _runtimeOwned()) {
+      await _ref
+          .read(bridgeServiceProvider)
+          .call('automation.delete', params: {'id': id});
+      return;
+    }
     await repo.deleteAutomation(id);
   }
 
-  Future<List<ScheduledAutomation>> getAll() async => (await _repo()).getAllAutomations();
+  Future<List<ScheduledAutomation>> getAll() async {
+    if (await _runtimeOwned()) {
+      final response = await _ref
+          .read(bridgeServiceProvider)
+          .call('automation.list');
+      return (response['automations'] as List<dynamic>? ?? [])
+          .map((v) => ScheduledAutomation.fromJson(v as Map<String, dynamic>))
+          .toList();
+    }
+    return (await _repo()).getAllAutomations();
+  }
 
   /// Fires [automationId] immediately — the "Run now" UI action. Goes
   /// through the exact same claim + fire path as a due firing (keyed by a
@@ -159,9 +240,17 @@ class SchedulerService {
   /// with or duplicate the automation's regular schedule.
   Future<Run?> triggerNow(String automationId) async {
     final repo = await _repo();
+    if (await _runtimeOwned()) {
+      final response = await _ref
+          .read(bridgeServiceProvider)
+          .call('automation.run_now', params: {'id': automationId});
+      final run = response['run'];
+      return run is Map ? Run.fromJson(Map<String, dynamic>.from(run)) : null;
+    }
     final automation = await repo.getAutomation(automationId);
     if (automation == null) return null;
-    final occurrenceKey = 'manual-${DateTime.now().toUtc().toIso8601String()}-${automationId.hashCode}';
+    final occurrenceKey =
+        'manual-${DateTime.now().toUtc().toIso8601String()}-${automationId.hashCode}';
     final claimed = await repo.claimOccurrence(automationId, occurrenceKey);
     if (!claimed) return null;
     return _fire(automation, occurrenceKey, repo);
@@ -171,6 +260,7 @@ class SchedulerService {
 
   Future<void> processDueAutomations({DateTime? nowUtc}) async {
     if (_disposed) return;
+    if (await _runtimeOwned()) return;
     final now = nowUtc ?? DateTime.now().toUtc();
     final repo = await _repo();
     final due = await repo.getDueAutomations(now);
@@ -207,12 +297,24 @@ class SchedulerService {
       // real Run fires "now" and every other missed period is just
       // skipped straight to the next future trigger.
       final refreshed = (await repo.getAutomation(automation.id))!;
-      final next = computeNextTrigger(refreshed.copyWith(lastTriggeredAt: trigger), now);
-      await repo.saveAutomation(refreshed.copyWith(nextTriggerAt: next, clearNextTriggerAt: next == null));
+      final next = computeNextTrigger(
+        refreshed.copyWith(lastTriggeredAt: trigger),
+        now,
+      );
+      await repo.saveAutomation(
+        refreshed.copyWith(
+          nextTriggerAt: next,
+          clearNextTriggerAt: next == null,
+        ),
+      );
     }
   }
 
-  Future<void> _advancePastDue(ScheduledAutomation automation, DateTime now, RunRepository repo) async {
+  Future<void> _advancePastDue(
+    ScheduledAutomation automation,
+    DateTime now,
+    RunRepository repo,
+  ) async {
     if (automation.scheduleType == AutomationScheduleType.once) return;
     final next = computeNextTrigger(automation, now);
     if (next != null) {
@@ -220,17 +322,23 @@ class SchedulerService {
     }
   }
 
-  Future<void> _markMissed(ScheduledAutomation automation, RunRepository repo) async {
-    await repo.saveAutomation(automation.copyWith(
-      enabled: false,
-      lastResult: AutomationResult.missed,
-      clearNextTriggerAt: true,
-      updatedAt: DateTime.now().toUtc(),
-    ));
+  Future<void> _markMissed(
+    ScheduledAutomation automation,
+    RunRepository repo,
+  ) async {
+    await repo.saveAutomation(
+      automation.copyWith(
+        enabled: false,
+        lastResult: AutomationResult.missed,
+        clearNextTriggerAt: true,
+        updatedAt: DateTime.now().toUtc(),
+      ),
+    );
     await _notify(
       type: NotificationType.automationMissed,
       title: 'Automation missed',
-      message: '"${automation.title}" was not running in time and has been disabled.',
+      message:
+          '"${automation.title}" was not running in time and has been disabled.',
       urgency: 'critical',
     );
   }
@@ -246,19 +354,23 @@ class SchedulerService {
     // the global default when no explicit provider/model is passed, so an
     // automation created against one model keeps using it even if the
     // user later changes their default elsewhere.
-    final run = await _ref.read(runListProvider.notifier).createRun(
-      automation.goal,
-      providerId: automation.providerId,
-      modelId: automation.modelId,
-      modelDisplayName: automation.modelDisplayName,
-      workspacePath: automation.workspacePath,
-    );
+    final run = await _ref
+        .read(runListProvider.notifier)
+        .createRun(
+          automation.goal,
+          providerId: automation.providerId,
+          modelId: automation.modelId,
+          modelDisplayName: automation.modelDisplayName,
+          workspacePath: automation.workspacePath,
+        );
 
-    await repo.saveAutomation(automation.copyWith(
-      lastRunId: run.id,
-      lastTriggeredAt: dueInstant ?? DateTime.now().toUtc(),
-      updatedAt: DateTime.now().toUtc(),
-    ));
+    await repo.saveAutomation(
+      automation.copyWith(
+        lastRunId: run.id,
+        lastTriggeredAt: dueInstant ?? DateTime.now().toUtc(),
+        updatedAt: DateTime.now().toUtc(),
+      ),
+    );
     await repo.linkOccurrenceRun(automation.id, occurrenceKey, run.id);
 
     _pendingRuns[run.id] = automation.id;
@@ -272,17 +384,25 @@ class SchedulerService {
     if (automation == null) return;
 
     final success = run.status == RunStatus.completed;
-    await repo.saveAutomation(automation.copyWith(
-      lastResult: success ? AutomationResult.success : AutomationResult.failure,
-      updatedAt: DateTime.now().toUtc(),
-    ));
+    await repo.saveAutomation(
+      automation.copyWith(
+        lastResult: success
+            ? AutomationResult.success
+            : AutomationResult.failure,
+        updatedAt: DateTime.now().toUtc(),
+      ),
+    );
 
     if (!success) {
-      final reason = run.errorMessage.isNotEmpty ? run.errorMessage : run.outcome;
+      final reason = run.errorMessage.isNotEmpty
+          ? run.errorMessage
+          : run.outcome;
       await _notify(
         type: NotificationType.automationFailed,
         title: 'Automation failed',
-        message: reason.isNotEmpty ? '"${automation.title}": $reason' : '"${automation.title}" did not complete.',
+        message: reason.isNotEmpty
+            ? '"${automation.title}": $reason'
+            : '"${automation.title}" did not complete.',
         runId: run.id,
         urgency: 'critical',
       );
@@ -317,7 +437,9 @@ class SchedulerService {
     );
     await _ref.read(notificationsProvider.notifier).add(notification);
     if (desktopNotify) {
-      await _ref.read(notificationServiceProvider).notify(title: title, body: message, urgency: urgency);
+      await _ref
+          .read(notificationServiceProvider)
+          .notify(title: title, body: message, urgency: urgency);
     }
   }
 }
@@ -335,7 +457,8 @@ final schedulerServiceProvider = Provider<SchedulerService>((ref) {
 /// now) — the same manual-refresh posture [RunsView] already uses for
 /// [runListProvider], rather than a bespoke live-streaming list for a
 /// screen that isn't the primary always-open surface.
-final automationsListProvider = FutureProvider.autoDispose<List<ScheduledAutomation>>((ref) async {
-  final scheduler = ref.watch(schedulerServiceProvider);
-  return scheduler.getAll();
-});
+final automationsListProvider =
+    FutureProvider.autoDispose<List<ScheduledAutomation>>((ref) async {
+      final scheduler = ref.watch(schedulerServiceProvider);
+      return scheduler.getAll();
+    });

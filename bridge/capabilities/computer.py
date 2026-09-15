@@ -182,6 +182,17 @@ def _execute_controlled_action(
     if coordinates is None and ("x" in params or "y" in params):
         coordinates = {"x": params.get("x"), "y": params.get("y")}
 
+    target_available = context.get("computer_target_available")
+    if callable(target_available):
+        # A Flutter-owned target legitimately disappears when its window is
+        # closed. Wait for registration instead of pretending the action was
+        # executed or failing a recoverable Run immediately. Cancellation
+        # remains responsive while the target is absent.
+        while not target_available(target_id):
+            if context.get("is_cancelled", lambda: False)():
+                return {"success": False, "cancelled": True, "error": "Run cancelled while waiting for the Computer target."}
+            time.sleep(0.25)
+
     request = COMPUTER_ACTION_MANAGER.create_request(
         run_id=run_id,
         task_id=task_id,

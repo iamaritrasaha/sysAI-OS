@@ -312,12 +312,13 @@ than adding a 24h `Duration`, which is what actually makes it correct
 across a DST transition (adding a fixed duration across one would land on
 the wrong wall-clock hour).
 
-`SchedulerService` (`lib/services/scheduler_service.dart`) is a single
-`Provider`, started once from `SysAIOSShell.initState` — one central
-`Timer.periodic` (30s) plus one immediate catch-up pass at construction,
-never one timer per automation. Firing an automation calls the exact same
-`runListProvider.notifier.createRun()` + `runExecutorProvider.execute()`
-path a manual Run uses — there is no second execution engine.
+The production scheduler is owned by `bridge/sysai_os_runtime.py` and ticks
+independently of Flutter. The Flutter `SchedulerService` is now only a
+compatibility facade for isolated/non-canonical repositories; it performs an
+immediate local pass but does not start a UI-owned background timer. Runtime
+automation firing creates a normal Run and enters the same
+`sysai_runner.execute_run()` capability/policy/approval pipeline as a manual
+Run — there is no second execution engine.
 
 **Duplicate-trigger protection**: `automation_occurrences` has a
 `UNIQUE(automation_id, occurrence_key)` constraint, and `claimOccurrence()`
@@ -402,7 +403,43 @@ sessions, and notifications are untouched — see
 `test/services/v4_to_v5_migration_test.dart`, which builds a real V4 file
 and migrates it, not a synthetic shortcut.
 
-### Background lifecycle — still just this one process
-See `docs/lifecycle.md`. The Scheduler's timer and any in-flight Run live
-only as long as the SysAI OS process does; there is no daemon here and
-none is claimed.
+### Phase 5 — Persistent Runtime
+
+`bridge/sysai_os_runtime.py` is the long-lived service. It imports the
+existing bridge handlers, Capability Registry, Policy Engine,
+`sysai_runner`, approval manager, terminal process controller, browser
+capabilities, and SysAI adapter. There is one runtime per user, protected by
+a non-blocking `fcntl.flock` lock file. A stale socket is safe to replace
+after the lock is acquired.
+
+Flutter's `BridgeService` is now a local Unix-domain-socket client. The
+runtime directory is selected from `SYSAI_RUNTIME_DIR`, `XDG_RUNTIME_DIR`,
+or a per-user state directory; the socket is mode 0600 and its containing
+directory is mode 0700 when owned by the process user. The protocol is
+versioned, request IDs are preserved, messages are capped at 1 MiB, malformed
+JSON is rejected without terminating the server, and no TCP listener exists.
+
+`runtime.status`, `run.*`, `automation.*`, `approval.*`,
+`notification.*`, `events.replay`, and `events.subscribe` are the stable
+runtime surface. Run events receive a monotonically increasing SQLite
+`event_id`; reconnecting clients provide their last cursor and receive
+replay followed by live events. A runtime-created scheduled Run follows the
+same `Run → Capability → Policy → Approval` pipeline as a manually-created
+Run.
+
+The runtime owns the canonical `runtime_*` execution tables in the existing
+SQLite file. The pre-existing Dart V1–V5 tables remain compatible and are a
+read-through cache for the current UI and legacy tests; Flutter no longer
+owns scheduler or child-process lifecycle. No schema version bump was
+needed: runtime metadata and event cursors live in new tables outside the
+application's existing V5 migration contract.
+
+The runtime produces persisted attention notifications and best-effort
+`notify-send` desktop notifications while Flutter is closed. A pending
+approval remains pending and is never auto-approved. The controlled Computer
+target is explicitly registered/unregistered by `ComputerView`; a target
+that was registered and then disappears causes the runtime action to wait
+until the target remounts. It is not simulated.
+
+See `docs/lifecycle.md` for startup, reconnect, close, shutdown, and future
+systemd-user integration guidance.

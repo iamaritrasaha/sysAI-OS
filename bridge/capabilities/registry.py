@@ -491,7 +491,7 @@ def _handle_sysai_diagnostics(params: Dict[str, Any], context: Dict[str, Any]) -
         # (see sysai/doctor.py: `config = config or load_config()`); the bug
         # was here, not in the engine — passing nothing silently fell back
         # to load_config()'s config.toml/hardcoded default, so a Run's
-        # model probe would test "qwen3:8b" even when the Run explicitly
+        # model probe would test the engine default even when the Run explicitly
         # selected a different model. Thread the Run's isolated config
         # through so the probe checks the model the Run actually selected.
         return run_doctor(context.get("run_config"), probe_model=probe)

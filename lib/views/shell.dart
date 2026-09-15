@@ -456,10 +456,14 @@ class _BridgeStatusBadge extends StatelessWidget {
     final (color, label) = bridgeStatus.when(
       data: (s) => switch (s) {
         BridgeStatus.connected => (const Color(0xffa5e887), 'Connected'),
+        BridgeStatus.connecting => (const Color(0xff65d5e8), 'Connecting...'),
+        BridgeStatus.reconnecting => (const Color(0xffffc46b), 'Reconnecting...'),
+        BridgeStatus.offline => (const Color(0xff91a2ab), 'Offline'),
+        BridgeStatus.incompatible => (const Color(0xffff6b6b), 'Incompatible runtime'),
+        BridgeStatus.disconnected => (const Color(0xff91a2ab), 'Disconnected'),
         BridgeStatus.sysaiUnavailable => (const Color(0xffffc46b), 'SysAI not found'),
         BridgeStatus.starting => (const Color(0xff65d5e8), 'Starting...'),
         BridgeStatus.failed => (const Color(0xffff6b6b), 'Bridge failed'),
-        _ => (const Color(0xff91a2ab), 'Offline'),
       },
       loading: () => (const Color(0xff65d5e8), 'Connecting...'),
       error: (e, s) => (const Color(0xffff6b6b), 'Error'),
