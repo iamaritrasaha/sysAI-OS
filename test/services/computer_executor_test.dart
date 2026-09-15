@@ -104,7 +104,13 @@ void main() {
           }
         }
         expect(finalRun, isNotNull);
-        expect(finalRun!.status, RunStatus.completed);
+        // This provider-only test deliberately has no mounted ComputerView,
+        // so the capture action cannot produce pixels.  A failed required
+        // task must fail the Run rather than being reported as a false
+        // success; the preceding observe/type/click actions still prove the
+        // real target round-trip and are checked below.
+        expect(finalRun!.status, RunStatus.failed);
+        expect(finalRun.events.any((e) => e.type == 'task.failed'), isTrue);
 
         // The real, shared TestSurfaceController state actually changed —
         // proving this wasn't a mocked success path.

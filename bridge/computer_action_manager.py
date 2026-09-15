@@ -91,13 +91,29 @@ class ComputerActionManager:
             with self._lock:
                 item.resolved = True
                 item.result = {"success": False, "error": "Computer action timed out waiting for Flutter to execute it."}
-            return item.result
-        return item.result
+                result = dict(item.result)
+                self._actions.pop(request_id, None)
+            return result
+        with self._lock:
+            result = dict(item.result)
+            self._actions.pop(request_id, None)
+        return result
 
-    def resolve(self, request_id: str, result: Dict[str, Any]) -> bool:
+    def resolve(
+        self,
+        request_id: str,
+        result: Dict[str, Any],
+        run_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+    ) -> bool:
         with self._lock:
             item = self._actions.get(request_id)
-            if not item or item.resolved:
+            if (
+                not item
+                or item.resolved
+                or (run_id is not None and item.run_id != run_id)
+                or (target_id is not None and item.target_id != target_id)
+            ):
                 return False
             item.resolved = True
             item.result = result

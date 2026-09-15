@@ -257,6 +257,11 @@ def _handle_fs_mkdir(params: Dict[str, Any], context: Dict[str, Any]) -> Dict[st
 # we keep counting but stop retaining lines — full output belongs in the
 # session's artifact/log, not in memory or in a flood of UI events.
 _TERMINAL_MAX_BUFFERED_LINES = 2000
+# A single line can be arbitrarily large (e.g. a minified bundle or a
+# base64 dump). Cap it before it enters memory, events, or the SQLite
+# run/event records — an uncapped line previously bloated the runtime's
+# run snapshot past the IPC frame limit and broke run.get/run.list.
+_TERMINAL_MAX_LINE_CHARS = 8000
 
 
 def _handle_shell_execute(params: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
@@ -313,6 +318,9 @@ def _handle_shell_execute(params: Dict[str, Any], context: Dict[str, Any]) -> Di
     def _reader(stream, sink: List[str], stream_name: str) -> None:
         try:
             for line in iter(stream.readline, ""):
+                if len(line) > _TERMINAL_MAX_LINE_CHARS:
+                    line = line[:_TERMINAL_MAX_LINE_CHARS]
+                    truncated[stream_name] = True
                 if len(sink) < _TERMINAL_MAX_BUFFERED_LINES:
                     sink.append(line)
                     _emit_event("terminal.output", stream=stream_name, line=line.rstrip("\n"))

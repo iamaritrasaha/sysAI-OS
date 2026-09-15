@@ -381,6 +381,35 @@ def _synthesize(goal: str, collected_results: List[Dict[str, Any]]) -> str:
 
 # ── Main Run Execution Loop ───────────────────────────────────────────────────
 
+def _model_profile_provider(profile: Any) -> str:
+    """Normalize the provider identity stored in a SysAI model profile."""
+    provider_name = str(getattr(profile, "provider", "")).lower().replace("_", "-")
+    profile_id = str(getattr(profile, "id", "")).lower()
+    if provider_name == "ollama" and profile_id.startswith("remote-ollama"):
+        return "remote-ollama"
+    if provider_name in ("openai", "openai-compatible", "remote"):
+        return "openai-compatible"
+    return provider_name
+
+
+def _native_model_name(provider: str, model: str) -> str:
+    """Strip only a known ModelInfo provider namespace from a model ID."""
+    value = model.strip()
+    provider_name = provider.lower().replace("_", "-")
+    prefixes = {provider_name}
+    if provider_name in ("ollama", "remote-ollama"):
+        prefixes.update(("ollama", "remote-ollama"))
+    elif provider_name in ("openai", "openai-compatible", "remote"):
+        prefixes.update(("openai", "openai-compatible", "remote"))
+    elif provider_name == "ollama-cloud":
+        prefixes.add("ollama-cloud")
+    for prefix in prefixes:
+        marker = prefix + ":"
+        if value.lower().startswith(marker):
+            return value[len(marker):]
+    return value
+
+
 def execute_run(
     *,
     req_id: str,
@@ -414,10 +443,20 @@ def execute_run(
     run_config = None
 
     try:
-        from sysai.config import load_config
+        from sysai.config import load_config, load_model_profiles
+        import dataclasses
         base_cfg = load_config()
         if not target_provider:
-            target_provider = base_cfg.provider
+            active_profile = next(
+                (profile for profile in load_model_profiles()
+                 if profile.id == getattr(base_cfg, "active_model_id", "")),
+                None,
+            )
+            target_provider = (
+                _model_profile_provider(active_profile)
+                if active_profile is not None
+                else base_cfg.provider
+            )
         if not target_model:
             from sysai_bridge import _check_model_available, _discover_models
             avail, _ = _check_model_available(target_provider, base_cfg.model, base_cfg)
@@ -439,7 +478,39 @@ def execute_run(
                 else:
                     target_model = base_cfg.model
 
+        # Flutter stores the namespaced ModelInfo.id (for example
+        # ``remote-ollama:audit-model``) so the selection remains unique in
+        # the UI. SysAI clients expect only the provider-native model name;
+        # normalize once before availability checks, profile lookup, and
+        # every downstream provider call.
+        target_model = _native_model_name(target_provider, target_model)
+
+        # Flutter persists the provider/model selection, not a mutable global
+        # client. Rehydrate endpoint/auth settings from the selected profile
+        # for this Run so concurrent Runs cannot inherit each other's backend.
         from sysai_bridge import _check_model_available
+        selected_profile = None
+        for profile in load_model_profiles():
+            if _model_profile_provider(profile) != target_provider:
+                continue
+            if profile.name == target_model or profile.id == getattr(base_cfg, "active_model_id", ""):
+                selected_profile = profile
+                break
+        if selected_profile is not None:
+            base_cfg = dataclasses.replace(
+                base_cfg,
+                provider=target_provider,
+                model=target_model,
+                ollama_url=(selected_profile.base_url
+                            if target_provider in ("ollama", "remote-ollama")
+                            else base_cfg.ollama_url),
+                ollama_auth_env=(selected_profile.api_key_env
+                                 if target_provider in ("ollama", "remote-ollama")
+                                 else base_cfg.ollama_auth_env),
+                model_endpoint=selected_profile.base_url,
+                api_key_env=selected_profile.api_key_env,
+                active_model_id=selected_profile.id,
+            )
         is_available, unavail_reason = _check_model_available(target_provider, target_model, base_cfg)
         if not is_available:
             emit_ev(
@@ -453,7 +524,6 @@ def execute_run(
             _done(emit, req_id, "failed", err_msg)
             return
 
-        import dataclasses
         run_config = dataclasses.replace(base_cfg, provider=target_provider, model=target_model)
     except ImportError:
         # The runtime cannot safely invent a provider/model when SysAI is not
@@ -532,6 +602,7 @@ def execute_run(
         emit_ev("run.started", message="Beginning autonomous execution")
 
         collected_results: List[Dict[str, Any]] = []
+        any_task_failed = False
 
         # 2. Task execution loop
         for task in plan:
@@ -579,6 +650,7 @@ def execute_run(
 
             capability = registry.get(capability_id)
             if not capability:
+                any_task_failed = True
                 err_msg = f"Unknown capability: {capability_id}"
                 emit_ev("task.failed", task_id=task_id, title=title, error=err_msg)
                 collected_results.append({
@@ -593,6 +665,7 @@ def execute_run(
             decision = policy_engine.evaluate(capability_id, params, context)
 
             if decision.verdict == PolicyVerdict.DENY:
+                any_task_failed = True
                 err_msg = f"Policy DENIED capability '{capability_id}': {decision.reason}"
                 emit_ev(
                     "capability.denied",
@@ -647,6 +720,7 @@ def execute_run(
                 )
 
                 if not approved:
+                    any_task_failed = True
                     err_msg = f"Operation '{capability.name}' was rejected by user."
                     emit_ev("task.failed", task_id=task_id, title=title, error=err_msg)
                     collected_results.append({
@@ -662,6 +736,12 @@ def execute_run(
             task_result: Dict[str, Any] = {}
 
             for attempt in range(1, max_attempts + 1):
+                # Cancellation must win over retry: a killed attempt must
+                # never respawn. Without this check a cancelled Run whose
+                # task allows retries would immediately start the next
+                # attempt (and its subprocess) after cancel_run().
+                if EXECUTION_CONTROLLER.is_cancelled(run_id):
+                    break
                 if attempt > 1:
                     emit_ev(
                         "task.retrying",
@@ -729,7 +809,13 @@ def execute_run(
                 finally:
                     EXECUTION_CONTROLLER.unregister_process(run_id)
 
+            if EXECUTION_CONTROLLER.is_cancelled(run_id):
+                emit_ev("run.cancelled", message="Run cancelled by user")
+                _done(emit, req_id, "cancelled", "Run cancelled by user.")
+                return
+
             if not task_success:
+                any_task_failed = True
                 emit_ev(
                     "task.failed",
                     task_id=task_id,
@@ -775,14 +861,20 @@ def execute_run(
             outcome=final_summary[:500],
         )
 
-        # 7. Complete Run
-        emit_ev(
-            "run.completed",
-            message="Run completed successfully",
-            outcome=final_summary,
-        )
-
-        _done(emit, req_id, "completed", final_summary)
+        # 7. A plan can continue after an individual task failure so later
+        # independent tasks still produce evidence, but the Run must not be
+        # reported as successful when any task failed.
+        if any_task_failed:
+            failure_message = "One or more Run tasks failed."
+            emit_ev("run.failed", message=failure_message, outcome=final_summary)
+            _done(emit, req_id, "failed", failure_message)
+        else:
+            emit_ev(
+                "run.completed",
+                message="Run completed successfully",
+                outcome=final_summary,
+            )
+            _done(emit, req_id, "completed", final_summary)
 
     except Exception as exc:
         tb = traceback.format_exc()

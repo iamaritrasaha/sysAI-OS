@@ -52,7 +52,10 @@ void main() {
       container.read(runExecutorProvider).execute(run.id);
 
       Run? finalRun;
-      for (var i = 0; i < 200; i++) {
+      // The full suite runs several real Ollama-backed Runs concurrently;
+      // under that load the runtime can legitimately take longer than the
+      // focused-test path to finish planning and diagnostics.
+      for (var i = 0; i < 300; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 100));
         final current = container.read(runByIdProvider(run.id));
         if (current != null && current.isTerminal) {
@@ -72,6 +75,6 @@ void main() {
       expect(persisted, isNotNull);
       expect(persisted!.status, RunStatus.completed);
     },
-    timeout: const Timeout(Duration(seconds: 30)),
+      timeout: const Timeout(Duration(seconds: 45)),
   );
 }

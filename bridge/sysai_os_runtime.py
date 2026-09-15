@@ -22,6 +22,7 @@ import secrets
 import signal
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -33,6 +34,11 @@ from zoneinfo import ZoneInfo
 PROTOCOL_VERSION = "1"
 RUNTIME_VERSION = "1.0.0"
 MAX_MESSAGE_BYTES = 1024 * 1024
+MAX_CLIENTS = 64
+# Recent-event window kept inside each run snapshot. Full history always
+# lives in runtime_events; this bounds run_json so run.get/run.list stay
+# under the IPC frame limit.
+MAX_EMBEDDED_EVENTS = 100
 TICK_SECONDS = 1.0
 ONCE_GRACE_SECONDS = 15 * 60
 
@@ -65,12 +71,21 @@ def _json(value: Any) -> str:
 
 
 def _secure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    try:
-        if path.stat().st_uid == os.getuid():
-            os.chmod(path, 0o700)
-    except OSError:
-        pass
+    """Create/validate a private runtime directory.
+
+    Runtime and socket paths can be supplied through the environment, so a
+    symlink or a directory owned by another user must never be accepted as a
+    trust boundary.  Failing closed here is preferable to binding a socket or
+    opening a database in an attacker-controlled location.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"Unsafe runtime directory (not a real directory): {path}")
+    if info.st_uid != os.getuid():
+        raise RuntimeError(f"Unsafe runtime directory (wrong owner): {path}")
+    if info.st_mode & 0o077:
+        path.chmod(0o700)
 
 
 class RuntimeStore:
@@ -79,7 +94,14 @@ class RuntimeStore:
     def __init__(self, path: Path):
         self.path = path
         _secure_dir(self.path.parent)
+        if path.exists():
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                raise RuntimeError(f"Unsafe runtime database path: {path}")
+            if info.st_uid != os.getuid():
+                raise RuntimeError(f"Unsafe runtime database owner: {path}")
         self.db = sqlite3.connect(str(path), check_same_thread=False, timeout=30)
+        os.chmod(path, 0o600)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.lock:
@@ -140,6 +162,13 @@ class RuntimeStore:
     def save_run(self, run: dict) -> None:
         now = run.get("updated_at") or _now()
         run["updated_at"] = now
+        # Clamp the embedded event window at the single write point so no
+        # caller (event application, injected run.create payload) can grow
+        # run_json past the IPC frame limit. Full history remains in
+        # runtime_events.
+        events = run.get("events")
+        if isinstance(events, list) and len(events) > MAX_EMBEDDED_EVENTS:
+            run["events"] = events[-MAX_EMBEDDED_EVENTS:]
         with self.lock:
             self.db.execute(
                 """INSERT INTO runtime_runs(id,run_json,status,created_at,updated_at)
@@ -156,9 +185,15 @@ class RuntimeStore:
             row = self.db.execute("SELECT run_json FROM runtime_runs WHERE id=?", (run_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def list_runs(self) -> list[dict]:
+    def list_runs(self, limit: Optional[int] = 50) -> list[dict]:
         with self.lock:
-            rows = self.db.execute("SELECT run_json FROM runtime_runs ORDER BY created_at DESC").fetchall()
+            if limit is None:
+                rows = self.db.execute("SELECT run_json FROM runtime_runs ORDER BY created_at DESC").fetchall()
+            else:
+                rows = self.db.execute(
+                    "SELECT run_json FROM runtime_runs ORDER BY created_at DESC LIMIT ?",
+                    (max(1, min(int(limit), 100)),),
+                ).fetchall()
         return [json.loads(row[0]) for row in rows]
 
     def append_event(self, run_id: str, event: dict) -> int:
@@ -196,11 +231,17 @@ class RuntimeStore:
             )
             self.db.commit()
 
-    def pending_approvals(self) -> list[dict]:
+    def pending_approvals(self, run_id: Optional[str] = None) -> list[dict]:
         with self.lock:
-            rows = self.db.execute(
-                "SELECT approval_json FROM runtime_approvals WHERE status='pending' ORDER BY created_at"
-            ).fetchall()
+            if run_id is None:
+                rows = self.db.execute(
+                    "SELECT approval_json FROM runtime_approvals WHERE status='pending' ORDER BY created_at"
+                ).fetchall()
+            else:
+                rows = self.db.execute(
+                    "SELECT approval_json FROM runtime_approvals WHERE status='pending' AND run_id=? ORDER BY created_at",
+                    (run_id,),
+                ).fetchall()
         return [json.loads(row[0]) for row in rows]
 
     def save_notification(self, notification: dict) -> None:
@@ -216,7 +257,8 @@ class RuntimeStore:
     def notifications(self, limit: int = 100) -> list[dict]:
         with self.lock:
             rows = self.db.execute(
-                "SELECT notification_json FROM runtime_notifications ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT notification_json FROM runtime_notifications ORDER BY created_at DESC LIMIT ?",
+                (max(1, min(int(limit), 100)),),
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
 
@@ -270,12 +312,33 @@ class RuntimeStore:
             self.db.execute("UPDATE runtime_occurrences SET run_id=? WHERE automation_id=? AND occurrence_key=?", (run_id, automation_id, key))
             self.db.commit()
 
+    def update_automation_result_for_run(self, run_id: str, success: bool) -> None:
+        """Record success/failure on the automation whose most recent firing
+        was `run_id`. Serialized names mirror Flutter's AutomationResult enum
+        (`success`/`failure`); a missing match is a no-op (manual runs)."""
+        with self.lock:
+            rows = self.db.execute("SELECT id, automation_json FROM runtime_automations").fetchall()
+        for _automation_id, blob in rows:
+            try:
+                automation = json.loads(blob)
+            except json.JSONDecodeError:
+                continue
+            if automation.get("last_run_id") != run_id:
+                continue
+            automation["last_result"] = "success" if success else "failure"
+            automation["updated_at"] = _now()
+            self.save_automation(automation)
+
 
 class Client:
     def __init__(self, conn: socket.socket):
         self.conn = conn
         self.lock = threading.Lock()
-        self.subscriptions: dict[str, int] = {}
+        # run_id -> {after_event_id, request_id}.  The request id is needed
+        # for live events: Dart routes streaming frames by id, while a bare
+        # runtime.event notification is not delivered to the subscription.
+        self.subscriptions: dict[str, dict[str, Any]] = {}
+        self.subscription_lock = threading.Lock()
         self.closed = False
 
     def send(self, message: dict) -> None:
@@ -283,6 +346,16 @@ class Client:
             return
         data = (_json(message) + "\n").encode()
         if len(data) > MAX_MESSAGE_BYTES:
+            # Never silently drop: a silently missing response looks like a
+            # client-side hang. Say so on the runtime log and to the client.
+            warning = {"type": "runtime.warning",
+                       "message": f"Runtime dropped a {len(data)}-byte frame exceeding the {MAX_MESSAGE_BYTES}-byte IPC limit."}
+            print(_json(warning), file=sys.stderr, flush=True)
+            try:
+                with self.lock:
+                    self.conn.sendall((_json(warning) + "\n").encode())
+            except OSError:
+                self.closed = True
             return
         try:
             with self.lock:
@@ -292,6 +365,8 @@ class Client:
 
     def close(self) -> None:
         self.closed = True
+        with self.subscription_lock:
+            self.subscriptions.clear()
         try:
             self.conn.close()
         except OSError:
@@ -319,9 +394,18 @@ class Runtime:
     def _recover_crashed_runs(self) -> None:
         """Apply the existing interruption boundary after a runtime crash."""
         active = {"created", "planning", "ready", "running", "waiting_approval", "blocked", "verifying"}
-        for run in self.store.list_runs():
+        for run in self.store.list_runs(None):
             if run.get("status") not in active:
                 continue
+            # In-memory approval waiters disappear with the old process. Do
+            # not leave a durable approval that a new runtime can report as
+            # pending even though no worker is capable of consuming it.
+            for approval in self.store.pending_approvals(run["id"]):
+                approval["status"] = "interrupted"
+                approval["resolved_at"] = _now()
+                self.store.save_approval(approval)
+            run.pop("pending_approval", None)
+            self.store.save_run(run)
             event = {
                 "type": "run.interrupted", "run_id": run["id"], "timestamp": _now(),
                 "message": "Runtime stopped unexpectedly; Run requires attention before it can be resumed.",
@@ -348,8 +432,25 @@ class Runtime:
         with self.clients_lock:
             clients = list(self.clients)
         for client in clients:
-            if run_id is None or run_id in client.subscriptions:
+            if run_id is None:
                 client.send(message)
+                continue
+            with client.subscription_lock:
+                subscription = client.subscriptions.get(run_id)
+                if subscription is None:
+                    continue
+                event = message.get("event")
+                event_id = event.get("event_id") if isinstance(event, dict) else None
+                cursor = int(subscription.get("after_event_id", 0))
+                if isinstance(event_id, int) and event_id <= cursor:
+                    continue
+                outgoing = dict(message)
+                subscription_id = subscription.get("request_id")
+                if subscription_id:
+                    outgoing["id"] = subscription_id
+                client.send(outgoing)
+                if isinstance(event_id, int):
+                    subscription["after_event_id"] = event_id
 
     def emit_runtime_event(self, event: dict, request_id: Optional[str] = None) -> dict:
         run_id = str(event.get("run_id", ""))
@@ -373,7 +474,17 @@ class Runtime:
         typ = event.get("type", "")
         ts = event.get("timestamp", _now())
         data = {k: v for k, v in event.items() if k not in ("type", "message")}
-        run.setdefault("events", []).append({"type": typ, "timestamp": ts, "message": event.get("message", ""), "data": data, "task_id": event.get("task_id")})
+        # terminal.output lines are per-line stream chatter: they are fully
+        # preserved in runtime_events (replayable via event cursors) but do
+        # not belong in the run snapshot — embedding them made run_json grow
+        # without bound on chatty commands, eventually exceeding the IPC
+        # frame limit and silently breaking run.get/run.list for every run.
+        if typ != "terminal.output":
+            run.setdefault("events", []).append({"type": typ, "timestamp": ts, "message": event.get("message", ""), "data": data, "task_id": event.get("task_id")})
+            # Full history lives in runtime_events; the snapshot keeps a
+            # bounded recent window so run_json stays frame-safe.
+            if len(run["events"]) > MAX_EMBEDDED_EVENTS:
+                run["events"] = run["events"][-MAX_EMBEDDED_EVENTS:]
         status_map = {
             "planning.started": "planning", "planning.completed": "ready", "run.started": "running",
             "task.started": "running", "verification.started": "verifying", "run.completed": "completed",
@@ -391,10 +502,17 @@ class Runtime:
                     if typ == "task.failed": task["error"] = event.get("error", "")
         if typ == "model.selected":
             run.setdefault("provider_id", event.get("provider")); run.setdefault("model_id", event.get("model")); run.setdefault("model_display_name", event.get("model"))
-        if typ in ("run.completed", "run.failed", "run.cancelled"):
+        if typ in ("run.completed", "run.failed", "run.cancelled", "run.interrupted"):
             run["completed_at"] = ts
             if typ == "run.completed": run["outcome"] = event.get("outcome", event.get("message", ""))
             if typ == "run.failed": run["error_message"] = event.get("message", event.get("error", ""))
+            # The runtime owns automation bookkeeping too: record the result
+            # on the automation that fired this Run so the UI reflects
+            # success/failure even though the legacy Flutter scheduler loop
+            # is dormant when the runtime is authoritative. An interrupted
+            # Run counts as failure — the legacy scheduler recorded any
+            # non-completed outcome that way.
+            self.store.update_automation_result_for_run(run_id, typ == "run.completed")
         if typ == "approval.requested":
             approval = {"id": event.get("approval_id", event.get("request_id", "")), "run_id": run_id, "task_id": event.get("task_id"), "capability_id": event.get("capability_id", ""), "title": event.get("title", "Approval Required"), "explanation": event.get("explanation", ""), "risk": event.get("risk", "high"), "payload": event.get("payload", {}), "status": "pending", "created_at": ts}
             run["pending_approval"] = approval; self.store.save_approval(approval)
@@ -424,13 +542,13 @@ class Runtime:
         except (OSError, subprocess.SubprocessError):
             pass
 
-    def _start_run(self, run: dict, client: Optional[Client] = None, request_id: Optional[str] = None, legacy_direct: bool = False) -> None:
+    def _start_run(self, run: dict, client: Optional[Client] = None, request_id: Optional[str] = None, legacy_direct: bool = False) -> bool:
         if not self.accepting:
-            return
+            return False
         run_id = run["id"]
         with self.active_lock:
             if run_id in self.active_runs:
-                return
+                return False
             self.active_runs.add(run_id)
 
         def worker() -> None:
@@ -452,6 +570,7 @@ class Runtime:
                 with self.active_lock: self.active_runs.discard(run_id)
 
         threading.Thread(target=worker, name=f"sysai-run-{run_id}", daemon=True).start()
+        return True
 
     def request_shutdown(self) -> None:
         """Stop new work and cooperatively terminate active execution."""
@@ -468,6 +587,19 @@ class Runtime:
             # Shutdown must still close the socket if the engine is already
             # unavailable or partially torn down.
             pass
+        # Approval and Computer waits are separate condition variables from
+        # process cancellation. Wake them explicitly so shutdown does not
+        # leave daemon workers blocked until their long request timeouts.
+        try:
+            from approval_manager import APPROVAL_MANAGER
+            from computer_action_manager import COMPUTER_ACTION_MANAGER
+            with self.active_lock:
+                active = list(self.active_runs)
+            for run_id in active:
+                APPROVAL_MANAGER.cancel_run(run_id)
+                COMPUTER_ACTION_MANAGER.cancel_run(run_id)
+        except Exception:
+            pass
         self.stop_event.set()
 
     def _runner_emit(self, envelope: dict, run_id: str, client: Optional[Client], request_id: Optional[str]) -> None:
@@ -477,7 +609,11 @@ class Runtime:
             # The execute_run caller receives its stream directly. A client
             # that also subscribed to the run already receives the broadcast
             # above, so avoid delivering a duplicate frame.
-            if client and not client.closed and run_id not in client.subscriptions:
+            subscribed = False
+            if client:
+                with client.subscription_lock:
+                    subscribed = run_id in client.subscriptions
+            if client and not client.closed and not subscribed:
                 client.send(routed)
         if envelope.get("done"):
             final = dict(envelope)
@@ -487,12 +623,8 @@ class Runtime:
 
     def target_available(self, target_id: str) -> bool:
         with self.targets_lock:
-            # The Phase 4 direct-provider test surface predates target
-            # registration. Preserve that compatibility until a target has
-            # explicitly registered once; after that, unregistering it is a
-            # real unavailable state and actions wait for remount.
             target = self.targets.get(target_id)
-            return True if target is None and target_id == "sysai-test-surface" else bool(target and target.get("available"))
+            return bool(target and target.get("available"))
 
     def due_automation_loop(self) -> None:
         while not self.stop_event.wait(TICK_SECONDS):
@@ -531,11 +663,19 @@ class Runtime:
         try: zone = ZoneInfo(automation.get("timezone", "UTC"))
         except Exception: zone = dt.timezone.utc
         local = now.astimezone(zone); hour, minute = int(expr.get("hour", local.hour)), int(expr.get("minute", local.minute))
-        candidate = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        # Work on the naive civil wall clock and attach the zone only at the
+        # end. Adding timedelta(days=...) directly to a zoned datetime shifts
+        # the wall time across DST transitions — a daily 09:00 automation
+        # would silently drift to 08:00 or 10:00 local after a clock change.
+        naive = local.replace(tzinfo=None, hour=hour, minute=minute, second=0, microsecond=0)
         if typ == "weekly":
-            weekday = int(expr.get("weekday", 1)); candidate += dt.timedelta(days=(weekday - candidate.isoweekday()) % 7)
-        if candidate <= local: candidate += dt.timedelta(days=7 if typ == "weekly" else 1)
-        return candidate.astimezone(dt.timezone.utc).isoformat()
+            weekday = int(expr.get("weekday", 1)); naive += dt.timedelta(days=(weekday - naive.isoweekday()) % 7)
+        if naive <= local.replace(tzinfo=None):
+            naive += dt.timedelta(days=7 if typ == "weekly" else 1)
+        # PEP 495: attaching the zone interprets `naive` as civil wall time
+        # (ambiguous instants resolve per fold=0; nonexistent instants are
+        # normalized by the zone's rules).
+        return naive.replace(tzinfo=zone).astimezone(dt.timezone.utc).isoformat()
 
     def rpc(self, request: dict, client: Client) -> Optional[dict]:
         req_id = str(request.get("id", "")); method = str(request.get("method", "")); params = request.get("params") or {}
@@ -552,37 +692,62 @@ class Runtime:
         if method == "run.create":
             run = params.get("run") or params
             if not isinstance(run, dict) or not run.get("id") or not run.get("goal"): return {"id": req_id, "ok": False, "error": "run requires id and goal", "code": "invalid_params"}
+            if self.store.get_run(str(run["id"])) is not None:
+                # Creation is not an update or a rerun. Refusing an existing
+                # ID prevents a second client from replacing the persisted
+                # goal/model while its original worker is still executing.
+                return {"id": req_id, "ok": False, "error": "Run ID already exists.", "code": "run_exists"}
             self.store.save_run(dict(run)); return {"id": req_id, "ok": True, "result": {"run": self.store.get_run(run["id"])}}
         if method == "run.get": return {"id": req_id, "ok": True, "result": {"run": self.store.get_run(str(params.get("run_id", "")))}}
-        if method == "run.list": return {"id": req_id, "ok": True, "result": {"runs": self.store.list_runs()}}
+        if method == "run.list": return {"id": req_id, "ok": True, "result": {"runs": self.store.list_runs(int(params.get("limit", 50)))}}
         if method == "execute_run":
             if not self.accepting:
                 return {"id": req_id, "ok": False, "error": "Runtime is shutting down", "code": "shutting_down"}
             run_id = str(params.get("run_id", "")); run = self.store.get_run(run_id)
-            if run and run.get("status") in {"completed", "failed", "cancelled", "interrupted"}:
-                # A terminal Run can be explicitly re-executed by a legacy
-                # bridge caller. Start a clean attempt under the same stable
-                # Run id; active Runs remain single-flight below.
-                stamp = _now(); goal = str(params.get("goal") or run.get("goal", "")).strip()
-                run = {**run, "title": goal[:57] + ("..." if len(goal) > 60 else ""), "goal": goal,
-                       "status": "created", "created_at": stamp, "updated_at": stamp,
-                       "plan": [], "events": [], "outcome": "", "error_message": "",
-                       "completed_at": None, "workspace_path": params.get("workspace_root", run.get("workspace_path")),
-                       "provider_id": params.get("provider", run.get("provider_id")),
-                       "model_id": params.get("model", run.get("model_id"))}
+            if run:
+                # Re-execution of a terminal Run is an explicit caller action
+                # supported by the existing API.  Keep it on this one runtime
+                # path, while _start_run still rejects concurrent execution
+                # of the same Run.  This is distinct from an interrupted Run
+                # being recovered, which must retain its persisted state.
+                # The persisted Run is the normal source of truth, but accept
+                # explicit execution parameters for callers that create and
+                # launch in separate races. Persist them before the worker is
+                # started so one request cannot silently inherit another
+                # request's provider/model.
+                run = dict(run)
+                if params.get("goal"):
+                    run["goal"] = str(params["goal"]).strip()
+                for param, field in (("provider", "provider_id"), ("model", "model_id"),
+                                     ("workspace_root", "workspace_path")):
+                    if param in params and params[param] is not None:
+                        run[field] = params[param]
+                run["updated_at"] = _now()
                 self.store.save_run(run)
             if not run:
                 stamp = _now(); goal = str(params.get("goal", "")).strip(); run = {"id": run_id, "title": goal[:57] + ("..." if len(goal) > 60 else ""), "goal": goal, "status": "created", "created_at": stamp, "updated_at": stamp, "plan": [], "events": [], "outcome": "", "error_message": "", "provider_id": params.get("provider"), "model_id": params.get("model"), "workspace_path": params.get("workspace_root")}; self.store.save_run(run)
-            self._start_run(run, client, req_id, legacy_direct=bool(params.get("legacy_direct"))); return {"id": req_id, "ok": True, "done": False, "event": {"type": "runtime.accepted", "run_id": run_id, "timestamp": _now()}}
+            if not self._start_run(run, client, req_id, legacy_direct=bool(params.get("legacy_direct"))):
+                return {"id": req_id, "ok": False, "error": "Run is already executing.", "code": "run_active"}
+            return {"id": req_id, "ok": True, "done": False, "event": {"type": "runtime.accepted", "run_id": run_id, "timestamp": _now()}}
         if method == "events.replay":
             run_id = str(params.get("run_id", "")); after = int(params.get("after_event_id", 0)); return {"id": req_id, "ok": True, "result": {"events": self.store.events(run_id, after)}}
         if method == "events.subscribe":
-            run_id = str(params.get("run_id", "")); client.subscriptions[run_id] = int(params.get("after_event_id", 0))
-            for event in self.store.events(run_id, client.subscriptions[run_id]):
-                client.send({"id": req_id, "ok": True, "done": False, "event": event})
+            run_id = str(params.get("run_id", "")); after = int(params.get("after_event_id", 0))
+            # Install the subscription before reading replay. Holding this
+            # lock across replay makes the replay/live handoff atomic: an
+            # event emitted during the read waits, then is sent after the
+            # replay cursor, with no gap or duplicate.
+            with client.subscription_lock:
+                client.subscriptions[run_id] = {"after_event_id": after, "request_id": req_id}
+                for event in self.store.events(run_id, after):
+                    client.send({"id": req_id, "ok": True, "done": False, "event": event})
+                    if isinstance(event.get("event_id"), int):
+                        client.subscriptions[run_id]["after_event_id"] = event["event_id"]
             return None
         if method == "events.unsubscribe":
-            client.subscriptions.pop(str(params.get("run_id", "")), None); return {"id": req_id, "ok": True, "result": {"unsubscribed": True}}
+            with client.subscription_lock:
+                client.subscriptions.pop(str(params.get("run_id", "")), None)
+            return {"id": req_id, "ok": True, "result": {"unsubscribed": True}}
         if method in ("resolve_approval", "report_computer_action_result", "pause_run", "resume_run", "cancel_run"):
             import sysai_bridge
             return sysai_bridge.HANDLERS[method](req_id, params)
@@ -617,7 +782,12 @@ class Runtime:
         buffer = b""
         try:
             while not self.stop_event.is_set():
-                chunk = conn.recv(65536)
+                try:
+                    chunk = conn.recv(65536)
+                except (ConnectionResetError, OSError):
+                    # A client disappearing mid-request is normal for a UI
+                    # reconnect and must only terminate that client thread.
+                    break
                 if not chunk: break
                 buffer += chunk
                 if len(buffer) > MAX_MESSAGE_BYTES: client.send({"ok": False, "error": "message exceeds 1 MiB limit", "code": "message_too_large"}); break
@@ -642,8 +812,13 @@ class Runtime:
 
     def run(self) -> None:
         _secure_dir(self.socket_path.parent)
-        try: self.socket_path.unlink()
-        except FileNotFoundError: pass
+        try:
+            existing = self.socket_path.lstat()
+            if not stat.S_ISSOCK(existing.st_mode):
+                raise RuntimeError(f"Refusing to replace non-socket runtime path: {self.socket_path}")
+            self.socket_path.unlink()
+        except FileNotFoundError:
+            pass
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(str(self.socket_path)); os.chmod(self.socket_path, 0o600); self.server.listen(16); self.server.settimeout(1)
         threading.Thread(target=self.due_automation_loop, name="sysai-scheduler", daemon=True).start()
@@ -651,6 +826,11 @@ class Runtime:
             try: conn, _ = self.server.accept()
             except socket.timeout: continue
             except OSError: break
+            with self.clients_lock:
+                too_many_clients = len(self.clients) >= MAX_CLIENTS
+            if too_many_clients:
+                conn.close()
+                continue
             threading.Thread(target=self.client_loop, args=(conn,), daemon=True).start()
         # Give canceled workers a short, bounded window to emit their final
         # state and let registered child processes reap before closing SQLite.
@@ -678,6 +858,7 @@ def main() -> int:
     _secure_dir(args.socket.parent)
     lock_path = args.socket.with_suffix(".lock")
     lock_file = open(lock_path, "a+")
+    os.fchmod(lock_file.fileno(), 0o600)
     try: fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return 2

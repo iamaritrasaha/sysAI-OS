@@ -90,13 +90,17 @@ class ApprovalManager:
             with self._lock:
                 item.resolved = True
                 item.approved = False
+                self._approvals.pop(request_id, None)
             return False
-        return item.approved
+        with self._lock:
+            approved = item.approved
+            self._approvals.pop(request_id, None)
+        return approved
 
-    def resolve(self, request_id: str, approved: bool) -> bool:
+    def resolve(self, request_id: str, approved: bool, run_id: Optional[str] = None) -> bool:
         with self._lock:
             item = self._approvals.get(request_id)
-            if not item or item.resolved:
+            if not item or item.resolved or (run_id is not None and item.run_id != run_id):
                 return False
             item.resolved = True
             item.approved = approved
@@ -165,10 +169,43 @@ class ExecutionController:
                     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 except Exception:
                     pass
+                threading.Thread(
+                    target=self._escalate_process_termination,
+                    args=(proc,),
+                    name=f"cancel-reaper-{run_id}",
+                    daemon=True,
+                ).start()
             return True
+
+    @staticmethod
+    def _escalate_process_termination(proc: subprocess.Popen) -> None:
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        except (OSError, ChildProcessError):
+            pass
 
     def register_process(self, run_id: str, proc: subprocess.Popen) -> None:
         with self._lock:
+            # Cancellation can race a capability spawning its process. Do not
+            # let a process registered after cancel escape the cancellation
+            # boundary; kill its process group before returning.
+            if run_id in self._cancelled_runs:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except Exception:
+                    pass
+                threading.Thread(
+                    target=self._escalate_process_termination,
+                    args=(proc,),
+                    name=f"cancel-reaper-{run_id}",
+                    daemon=True,
+                ).start()
+                return
             self._active_procs[run_id] = proc
 
     def unregister_process(self, run_id: str) -> None:

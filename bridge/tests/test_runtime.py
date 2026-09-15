@@ -64,6 +64,13 @@ class RuntimeProtocolTests(unittest.TestCase):
             "plan": [], "events": [], "outcome": "", "error_message": "",
         }}})
         self.assertTrue(self.receive()["ok"])
+        self.send({"id": "duplicate-create", "method": "run.create", "params": {"run": {
+            "id": "run-replay", "goal": "replacement must be rejected", "status": "created",
+            "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
+        }}})
+        duplicate = self.receive()
+        self.assertFalse(duplicate["ok"])
+        self.assertEqual(duplicate["code"], "run_exists")
         self.runtime.emit_runtime_event({"type": "run.started", "run_id": "run-replay", "timestamp": "2026-01-01T00:00:01+00:00", "message": "started"})
         self.send({"id": "replay", "method": "events.replay", "params": {"run_id": "run-replay", "after_event_id": 0}})
         replay = self.receive()["result"]["events"]
@@ -110,6 +117,29 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(response["result"]["events"][0]["type"], "terminal.output")
         self.assertEqual(response["result"]["events"][0]["event_id"], 1)
         client.close()
+
+    def test_subscription_replay_transitions_to_id_routed_live_events(self) -> None:
+        self.send({"id": "create-sub", "method": "run.create", "params": {"run": {
+            "id": "run-sub", "goal": "subscription", "status": "running",
+            "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
+        }}})
+        self.assertTrue(self.receive()["ok"])
+        self.runtime.emit_runtime_event({
+            "type": "task.started", "run_id": "run-sub", "task_id": "t1",
+        })
+        self.send({"id": "sub-1", "method": "events.subscribe",
+                   "params": {"run_id": "run-sub", "after_event_id": 0}})
+        replay = self.receive()
+        self.assertEqual(replay["id"], "sub-1")
+        self.assertEqual(replay["event"]["event_id"], 1)
+
+        self.runtime.emit_runtime_event({
+            "type": "task.completed", "run_id": "run-sub", "task_id": "t1",
+        })
+        live = self.receive()
+        self.assertEqual(live["id"], "sub-1", "live frames must route to the streaming request")
+        self.assertEqual(live["event"]["event_id"], 2)
+        self.assertEqual(live["event"]["type"], "task.completed")
 
 
 if __name__ == "__main__":

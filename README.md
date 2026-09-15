@@ -9,8 +9,8 @@ It replaces chat-style assistants with an operating system paradigm: users state
 ## Architecture & Integration
 
 - **SysAI Engine is Read-Only**: The core AI runtime, provider routing, Experience Engine, collectors, and diagnostics live in the separate `SysAI` repository. SysAI OS treats it as an external dependency and does not mutate it.
-- **Python NDJSON Bridge**: SysAI OS spawns `bridge/sysai_bridge.py` as a subprocess communicating over standard I/O with newline-delimited JSON.
-- **State Persistence**: Runs, plan steps, and structured events are stored locally in SQLite (`sysai_os.db`) using WAL mode, surviving application restarts.
+- **Persistent Python Runtime**: SysAI OS connects over a private Unix-domain socket to `bridge/sysai_os_runtime.py`; the runtime owns execution, scheduling, approvals, notifications, and replayable event persistence and survives Flutter disconnects. The older `bridge/sysai_bridge.py` stdin/stdout adapter remains for compatibility tests only.
+- **State Persistence**: The runtime's `runtime_*` SQLite tables are canonical for execution state; the Flutter `sysai_os.db` tables are a presentation projection and compatibility store. Both use WAL-mode SQLite where they are opened.
 
 For full architectural details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -92,10 +92,12 @@ SysAI OS gained three new operational surfaces, all going through the same Capab
 
 ## Phase 4: Persistent Automations & Controlled Computer Use
 
-- **Automations**: `ScheduledAutomation` (once/interval/daily/weekly) persists a goal, workspace, and provider/model — firing one creates a normal `Run` through the exact same pipeline a manual Run uses. DST-safe scheduling via `package:timezone`; duplicate-trigger protection via a `UNIQUE(automation_id, occurrence_key)` claim table; a deterministic, documented missed-trigger policy (a `once` fires within a 15-minute grace window or is marked missed, a recurring automation catches up once and recomputes past `now`). One central 30-second timer, never one per automation. Manage from the **Automations** tab: create, edit, enable/disable, run now, delete, and see next run / last result / linked past Runs.
+- **Automations**: `ScheduledAutomation` (once/interval/daily/weekly) persists a goal, workspace, and provider/model — firing one creates a normal `Run` through the exact same runtime pipeline a manual Run uses. DST-safe scheduling via `package:timezone`; duplicate-trigger protection via a `UNIQUE(automation_id, occurrence_key)` claim table; a deterministic, documented missed-trigger policy (a `once` fires within a 15-minute grace period or is marked missed, while a recurring automation catches up once and recomputes past `now`). The persistent runtime owns the production scheduler; Flutter's scheduler service is a CRUD/isolated-test compatibility facade and does not run a background timer in the canonical configuration. Manage from the **Automations** tab: create, edit, enable/disable, run now, delete, and see next run / last result / linked past Runs.
 - **Controlled Computer Use** — explicitly not unrestricted desktop automation. Real `observe`/`capture`/`click`/`type`/`key`/`scroll` actions execute against exactly one registered, SysAI-owned target: a deterministic Flutter test surface (**Computer** tab). Since the Python bridge can't reach the live widget tree, an action is a request/block/resolve round-trip (mirroring the existing approval flow) — Flutter executes the real widget callback and reports the result back. Any other target is denied outright by the Policy Engine, on target identity. `type`/`key` still require approval even against the registered target. Captures use Flutter's own `RenderRepaintBoundary.toImage()`, not an OS screenshot tool.
 - **Workspace selection**: `Run.workspacePath` / the bridge's `workspace_root` parameter are now wired through for every Run (manual or scheduled) — previously silently defaulted for all Runs.
-- The Scheduler and any in-flight Run run only while the SysAI OS process is alive — see `docs/lifecycle.md`. This is not a background daemon.
+- The runtime and any in-flight Run remain alive while the runtime process is
+  alive, including while Flutter is disconnected; see `docs/lifecycle.md`.
+  The current runtime is a user-session service, not a system-wide daemon.
 - Schema `V4 → V5` adds `scheduled_automations`, `automation_occurrences`, `computer_sessions`, `computer_actions`, and a `workspace_path` column on `runs`, idempotently, preserving every existing row. See `docs/ARCHITECTURE.md` §8 for the full design.
 
 ---

@@ -66,6 +66,7 @@ class RunRepository {
     final db = sqlite3.open(dbPath);
     db.execute('PRAGMA journal_mode=WAL;');
     db.execute('PRAGMA foreign_keys=ON;');
+    db.execute('PRAGMA busy_timeout=30000;');
     return RunRepository._(db, dbPath);
   }
 

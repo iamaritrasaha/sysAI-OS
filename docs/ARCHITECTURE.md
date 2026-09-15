@@ -37,7 +37,7 @@ SysAI OS is a desktop-first **Agentic Operating Environment** powered by the exi
 | **User Interface** | Desktop shell (Flutter, dark-first, GTK/Adwaita) | Terminal CLI |
 | **Run Abstraction** | Persistent `Run` model, lifecycle state machine | Single commands / interactive PTY session |
 | **Event System** | Structured NDJSON event stream (`RunEvent`) | Terminal text / ANSI streams |
-| **Persistence** | SQLite `sysai_os.db` (runs, plans, events) | SQLite `memory.db` (experience store) |
+| **Persistence** | Runtime-owned `runtime_*` SQLite tables; Dart `sysai_os.db` is a projection/cache | SQLite `memory.db` (experience store) |
 | **Orchestration** | Agent runner (Plan → Execute → Verify) | Deterministic collectors + LLM reasoning |
 | **Intelligence** | Uses SysAI adapter | Model providers (Ollama, cloud), prompt assembly |
 | **Self-Diagnostics**| OS status UI | Deterministic `doctor` checks |
@@ -47,18 +47,28 @@ SysAI OS is a desktop-first **Agentic Operating Environment** powered by the exi
 ## 2. Integration & Adapter Boundary
 
 ### Principle: Zero SysAI Modifications
-The SysAI repository is strictly immutable upstream software. SysAI OS connects to it via an out-of-process Python bridge (`bridge/sysai_bridge.py`) that imports SysAI modules directly via standard Python import mechanisms:
+The SysAI repository is strictly immutable upstream software. In the desktop
+configuration, SysAI OS connects to it through the persistent runtime
+(`bridge/sysai_os_runtime.py`), which imports the adapter and SysAI modules in
+the runtime process. The older `bridge/sysai_bridge.py` stdin/stdout entrypoint
+is retained only for compatibility and direct bridge tests; it is not a second
+desktop execution service.
 
 ```
 Flutter Desktop UI
-       ↕ (stdin / stdout pipes)
-Python Bridge (bridge/sysai_bridge.py)
+       ↕ (Unix-domain socket)
+Persistent Python Runtime (bridge/sysai_os_runtime.py)
+       ↕ (in-process adapter handlers)
+Compatibility Adapter (bridge/sysai_bridge.py)
        ↕ (Python in-process import via sys.path)
 SysAI Engine Modules (sysai.config, sysai.doctor, sysai.memory, sysai.domains, etc.)
 ```
 
 ### Communication Protocol
-- Transport: Subprocess stdin / stdout
+- Production transport: versioned newline-delimited JSON over a local
+  Unix-domain socket. The runtime survives Flutter disconnects.
+- Compatibility transport: subprocess stdin/stdout NDJSON for direct bridge
+  tests and older integrations; it is not used by the desktop app.
 - Format: Newline-Delimited JSON (NDJSON)
 - One-shot Request:
   ```json
@@ -122,7 +132,11 @@ A `Run` represents one user goal executed by the OS.
 ```
 
 ### Terminal States
-`COMPLETED`, `FAILED`, `CANCELLED`, `INTERRUPTED`.
+`COMPLETED`, `FAILED`, `CANCELLED`, `INTERRUPTED`. A required task failure
+causes `FAILED`; later independent tasks may still run so the Run retains
+useful evidence, but verification cannot convert that Run into a false
+success. Re-execution of a terminal Run is an explicit API action and still
+passes through the same runtime single-flight guard.
 
 ---
 
@@ -150,7 +164,9 @@ SysAI OS never parses raw terminal output for state. All actions emit typed `Run
 ## 5. Persistence & Database Migrations
 
 - Engine: SQLite (via `sqlite3` direct binding, WAL mode, foreign keys enabled)
-- Database File: `<app_support_dir>/sysai_os.db`
+- Database Files: the canonical runtime uses a per-user state SQLite file for
+  `runtime_*` tables; the existing `<app_support_dir>/sysai_os.db` remains the
+  Flutter projection/compatibility store.
 - Migration Versioning: Managed via `PRAGMA user_version` (V1 -> V2 -> V3), applied incrementally and idempotently (`ALTER TABLE` guarded by try/catch) so upgrading never loses existing data.
 - Tables:
   - `runs`: Run metadata, plan JSON, events JSON, outcome, timestamps, plus `provider_id` / `model_id` / `model_display_name` (V3) — the model a Run actually used, fixed at creation
@@ -158,7 +174,10 @@ SysAI OS never parses raw terminal output for state. All actions emit typed `Run
   - `artifacts`: Output files, diffs, reports, command logs, content previews, metadata
   - `checkpoints`: Step index state snapshots for pause/resume and crash recovery
   - `settings` (V3): SysAI OS's own key/value preferences — currently the default model (`default_provider_id` / `default_model_id` / `default_model_display_name`), independent of SysAI's own `config.toml`
-- Crash Recovery: Startup lifecycle automatically invokes `recoverInterruptedRuns()`, transitioning active runs left non-terminal by sudden shutdowns to `INTERRUPTED` state with attention flags.
+- Crash Recovery: the runtime marks active persisted Runs `INTERRUPTED` on
+  startup and closes orphaned approval waits; Flutter refreshes its projection
+  from the runtime. The Dart repository's `recoverInterruptedRuns()` remains
+  for non-canonical/isolated compatibility use.
 
 ---
 
@@ -422,24 +441,56 @@ JSON is rejected without terminating the server, and no TCP listener exists.
 `runtime.status`, `run.*`, `automation.*`, `approval.*`,
 `notification.*`, `events.replay`, and `events.subscribe` are the stable
 runtime surface. Run events receive a monotonically increasing SQLite
-`event_id`; reconnecting clients provide their last cursor and receive
-replay followed by live events. A runtime-created scheduled Run follows the
-same `Run → Capability → Policy → Approval` pipeline as a manually-created
-Run.
+`event_id`; reconnecting clients provide their last cursor and receive an
+atomic replay-to-live subscription. Live frames retain the subscription
+request ID, so the Flutter stream cannot miss or misroute them. A
+runtime-created scheduled Run follows the same
+`Run → Capability → Policy → Approval` pipeline as a manually-created Run.
 
-The runtime owns the canonical `runtime_*` execution tables in the existing
-SQLite file. The pre-existing Dart V1–V5 tables remain compatible and are a
-read-through cache for the current UI and legacy tests; Flutter no longer
-owns scheduler or child-process lifecycle. No schema version bump was
-needed: runtime metadata and event cursors live in new tables outside the
-application's existing V5 migration contract.
+#### Canonical ownership
+
+There is one owner for each execution concern. The Dart tables are projections
+for presentation and backwards-compatible local tests; they are not a second
+execution state machine.
+
+| Concern | Canonical owner | Flutter/Dart role |
+|---|---|---|
+| Runs, tasks, plan, terminal state | Python persistent runtime (`runtime_runs`) | Read/projection cache |
+| Events and replay cursor | Python runtime (`runtime_events`) | Stream/render projection |
+| Scheduler and occurrence claims | Python runtime (`runtime_automations`, `runtime_occurrences`) | CRUD facade only |
+| Approval gates | Python runtime/`ApprovalManager`, persisted in `runtime_approvals` | Present and submit a bound response |
+| Notifications | Python runtime (`runtime_notifications`) | Read/mark-read projection; native display is best effort |
+| Model resolution for a Run | Run-scoped runtime `Config`, then SysAI provider | Select and persist provider/model identifiers |
+| Workspace boundary | Run's persisted `workspace_path`, enforced by Python policy/capabilities | Choose/display workspace |
+| Terminal and browser execution | Python capability handlers and runtime events | Render live output and derived session rows |
+| Computer target authorization | Python runtime target registry and policy | Own the registered test-surface widget and perform the requested action |
+
+No schema version bump was needed: runtime metadata and event cursors live in
+new tables outside the application's existing V5 migration contract. Flutter
+does not run a scheduler timer in the canonical runtime configuration and
+cannot launch a child process independently of the runtime.
+
+Run snapshots are bounded: full event history lives in `runtime_events`
+(replayable by cursor), while each run record embeds only a recent window
+without per-line `terminal.output` chatter. This keeps `run_json` — and
+therefore `run.get`/`run.list` responses — under the 1 MiB IPC frame limit;
+a frame that still exceeds it is announced to the client with a
+`runtime.warning` instead of being dropped silently. When a Run reaches a
+terminal state, the runtime also records `last_result` on the automation
+that fired it, so the Automations UI stays truthful while Flutter's local
+scheduler loop is dormant.
 
 The runtime produces persisted attention notifications and best-effort
 `notify-send` desktop notifications while Flutter is closed. A pending
-approval remains pending and is never auto-approved. The controlled Computer
-target is explicitly registered/unregistered by `ComputerView`; a target
-that was registered and then disappears causes the runtime action to wait
-until the target remounts. It is not simulated.
+approval remains pending and is never auto-approved while its runtime is
+alive; if the runtime itself crashes, startup recovery marks the Run
+interrupted and closes the orphaned in-memory approval rather than leaving an
+approval that no worker can consume. Approval and Computer result RPCs are
+bound to the originating Run (and Computer target), and duplicate/stale
+responses are rejected. The controlled Computer target is explicitly
+registered/unregistered by `ComputerView`; a target that was registered and
+then disappears causes the runtime action to wait until the target remounts.
+It is not simulated.
 
 See `docs/lifecycle.md` for startup, reconnect, close, shutdown, and future
 systemd-user integration guidance.

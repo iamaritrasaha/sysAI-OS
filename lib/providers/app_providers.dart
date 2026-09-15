@@ -504,6 +504,11 @@ class RunListNotifier extends AsyncNotifier<List<Run>> {
   }
 
   Future<void> refreshFromDb() async {
+    final bridge = ref.read(bridgeServiceProvider);
+    if (bridge.isReady && bridge.databasePath != null) {
+      await refreshFromRuntime();
+      return;
+    }
     final repo = await ref.read(runRepositoryProvider.future);
     state = AsyncValue.data(await repo.getAllRuns());
   }
@@ -525,9 +530,7 @@ class RunListNotifier extends AsyncNotifier<List<Run>> {
   }
 
   static String _generateId() {
-    final now = DateTime.now();
-    final ms = now.millisecondsSinceEpoch;
-    return 'run-$ms';
+    return 'run-${DateTime.now().microsecondsSinceEpoch}';
   }
 }
 
@@ -576,6 +579,8 @@ class RunExecutor {
   final Ref _ref;
   final Map<String, StreamSubscription<Map<String, dynamic>>> _subscriptions =
       {};
+  final Set<String> _startingRuns = {};
+  final Map<String, Future<void>> _eventTails = {};
   bool _disposed = false;
 
   RunExecutor(this._ref);
@@ -583,16 +588,21 @@ class RunExecutor {
   /// Starts executing a run by submitting its goal to the bridge.
   Future<void> execute(String runId) async {
     if (_disposed) return;
+    if (_subscriptions.containsKey(runId) || !_startingRuns.add(runId)) return;
     final runs = _ref.read(runListProvider).valueOrNull ?? [];
     Run? run;
     try {
       run = runs.firstWhere((r) => r.id == runId);
     } catch (_) {
+      _startingRuns.remove(runId);
       return;
     }
 
     final bridge = _ref.read(bridgeServiceProvider);
-    if (!bridge.isReady) return;
+    if (!bridge.isReady) {
+      _startingRuns.remove(runId);
+      return;
+    }
 
     // Transition to planning
     await _updateRun(
@@ -602,7 +612,10 @@ class RunExecutor {
         events: run.events,
       ),
     );
-    if (_disposed) return;
+    if (_disposed) {
+      _startingRuns.remove(runId);
+      return;
+    }
 
     final stream = bridge.callStreaming(
       'execute_run',
@@ -618,7 +631,7 @@ class RunExecutor {
 
     final sub = stream.listen(
       (event) {
-        if (!_disposed) unawaited(_handleEvent(runId, event));
+        if (!_disposed) _enqueueEvent(runId, event);
       },
       onError: (e) async {
         if (_disposed) return;
@@ -639,6 +652,7 @@ class RunExecutor {
     );
 
     _subscriptions[runId] = sub;
+    _startingRuns.remove(runId);
   }
 
   /// Reattaches live event streams after a UI reconnect. The runtime keeps
@@ -661,7 +675,7 @@ class RunExecutor {
       );
       _subscriptions[run.id] = stream.listen(
         (event) {
-          if (!_disposed) unawaited(_handleEvent(run.id, event));
+          if (!_disposed) _enqueueEvent(run.id, event);
         },
         onError: (_) => _subscriptions.remove(run.id),
         onDone: () => _subscriptions.remove(run.id),
@@ -676,7 +690,12 @@ class RunExecutor {
     bool approved,
   ) async {
     final bridge = _ref.read(bridgeServiceProvider);
-    await bridge.resolveApproval(requestId, approved);
+    final resolvedByRuntime = await bridge.resolveApproval(
+      requestId,
+      approved,
+      runId: runId,
+    );
+    if (!resolvedByRuntime) return;
 
     final current = _ref.read(runByIdProvider(runId));
     if (current == null) return;
@@ -701,7 +720,7 @@ class RunExecutor {
   /// Pauses an active run.
   Future<void> pauseRun(String runId) async {
     final bridge = _ref.read(bridgeServiceProvider);
-    await bridge.pauseRun(runId);
+    if (!await bridge.pauseRun(runId)) return;
     final current = _ref.read(runByIdProvider(runId));
     if (current != null) {
       await _updateRun(current.copyWith(status: RunStatus.blocked));
@@ -711,7 +730,7 @@ class RunExecutor {
   /// Resumes a paused run.
   Future<void> resumeRun(String runId) async {
     final bridge = _ref.read(bridgeServiceProvider);
-    await bridge.resumeRun(runId);
+    if (!await bridge.resumeRun(runId)) return;
     final current = _ref.read(runByIdProvider(runId));
     if (current != null) {
       await _updateRun(current.copyWith(status: RunStatus.running));
@@ -721,7 +740,7 @@ class RunExecutor {
   /// Cancels an active run.
   Future<void> cancelRun(String runId) async {
     final bridge = _ref.read(bridgeServiceProvider);
-    await bridge.cancelRun(runId);
+    if (!await bridge.cancelRun(runId)) return;
     final current = _ref.read(runByIdProvider(runId));
     if (current != null) {
       await _updateRun(
@@ -756,7 +775,25 @@ class RunExecutor {
     await execute(runId);
   }
 
-  Future<void> _handleEvent(String runId, Map<String, dynamic> event) async {
+  void _enqueueEvent(String runId, Map<String, dynamic> event) {
+    final previous = _eventTails[runId] ?? Future<void>.value();
+    final next = previous.then<void>((_) async {
+      try {
+        await _handleEventNow(runId, event);
+      } catch (_) {
+        // Keep later events flowing when a stale/malformed projection event
+        // cannot be applied.
+      }
+    });
+    _eventTails[runId] = next;
+    unawaited(
+      next.whenComplete(() {
+        if (identical(_eventTails[runId], next)) _eventTails.remove(runId);
+      }),
+    );
+  }
+
+  Future<void> _handleEventNow(String runId, Map<String, dynamic> event) async {
     if (_disposed) return;
     final current = _ref.read(runByIdProvider(runId));
     if (current == null) return;
@@ -1259,7 +1296,12 @@ class RunExecutor {
     // end of ComputerActionManager.wait_for_result().
     await _ref
         .read(bridgeServiceProvider)
-        .reportComputerActionResult(requestId, result);
+        .reportComputerActionResult(
+          requestId,
+          result,
+          runId: run.id,
+          targetId: targetId,
+        );
   }
 
   List<RunTask> _buildPlan(Map<String, dynamic> event, List<RunTask> current) {

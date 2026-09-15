@@ -72,6 +72,7 @@ class BridgeService {
   String? get bridgeError => _bridgeError;
   BridgeStatus get status => _status;
   String? get socketPath => _runtimeSocket;
+
   /// Non-null for the desktop client using the canonical application DB.
   /// Legacy direct callers omit this and retain the pre-registration behavior.
   String? get databasePath => _databasePath;
@@ -273,7 +274,8 @@ class BridgeService {
             'id': id,
             'method': 'events.unsubscribe',
             'params': {
-              if (requestParams['run_id'] != null) 'run_id': requestParams['run_id'],
+              if (requestParams['run_id'] != null)
+                'run_id': requestParams['run_id'],
             },
           });
         } catch (_) {}
@@ -291,20 +293,35 @@ class BridgeService {
         .toList();
   }
 
-  Future<bool> resolveApproval(String requestId, bool approved) async =>
+  Future<bool> resolveApproval(
+    String requestId,
+    bool approved, {
+    String? runId,
+  }) async =>
       (await call(
             'resolve_approval',
-            params: {'request_id': requestId, 'approved': approved},
+            params: {
+              'request_id': requestId,
+              'approved': approved,
+              'run_id': runId,
+            },
           ))['resolved']
           as bool? ??
       false;
   Future<bool> reportComputerActionResult(
     String requestId,
-    Map<String, dynamic> result,
-  ) async =>
+    Map<String, dynamic> result, {
+    String? runId,
+    String? targetId,
+  }) async =>
       (await call(
             'report_computer_action_result',
-            params: {'request_id': requestId, 'result': result},
+            params: {
+              'request_id': requestId,
+              'result': result,
+              'run_id': runId,
+              'target_id': targetId,
+            },
           ))['resolved']
           as bool? ??
       false;

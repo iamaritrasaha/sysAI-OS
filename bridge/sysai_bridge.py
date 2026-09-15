@@ -240,7 +240,8 @@ def handle_list_capabilities(req_id: str, _params: dict) -> dict:
 def handle_resolve_approval(req_id: str, params: dict) -> dict:
     appr_id = str(params.get("request_id") or params.get("approval_id") or "")
     approved = bool(params.get("approved", False))
-    success = APPROVAL_MANAGER.resolve(appr_id, approved)
+    run_id = params.get("run_id")
+    success = APPROVAL_MANAGER.resolve(appr_id, approved, str(run_id) if run_id is not None else None)
     return _ok(req_id, {"resolved": success, "request_id": appr_id, "approved": approved})
 
 
@@ -256,7 +257,14 @@ def handle_report_computer_action_result(req_id: str, params: dict) -> dict:
     the same shape resolve_approval unblocks ApprovalManager.wait_for_decision."""
     action_id = str(params.get("request_id") or "")
     result = params.get("result") or {}
-    resolved = COMPUTER_ACTION_MANAGER.resolve(action_id, result)
+    run_id = params.get("run_id")
+    target_id = params.get("target_id")
+    resolved = COMPUTER_ACTION_MANAGER.resolve(
+        action_id,
+        result,
+        str(run_id) if run_id is not None else None,
+        str(target_id) if target_id is not None else None,
+    )
     return _ok(req_id, {"resolved": resolved, "request_id": action_id})
 
 
@@ -359,6 +367,25 @@ def _check_model_available(provider: str, model: str, cfg: Any) -> tuple[bool, s
     return False, f"Unknown provider: {provider}"
 
 
+def _model_profile_provider(profile: Any) -> str:
+    """Return the stable provider id exposed to SysAI OS for a profile.
+
+    The CLI historically stores a remote Ollama profile with provider
+    ``ollama`` because the engine uses the same client implementation. That
+    provider id is ambiguous at the OS boundary: a Run carrying only
+    ``provider=ollama, model=name`` would silently fall back to local Ollama.
+    Profile ids are the remaining durable discriminator, so normalize that
+    legacy representation before sending models to Flutter.
+    """
+    provider = str(getattr(profile, "provider", "")).lower().replace("_", "-")
+    profile_id = str(getattr(profile, "id", "")).lower()
+    if provider == "ollama" and profile_id.startswith("remote-ollama"):
+        return "remote-ollama"
+    if provider in ("openai", "openai-compatible", "remote"):
+        return "openai-compatible"
+    return provider
+
+
 def _discover_providers(cfg: Any) -> list[dict]:
     providers = []
 
@@ -407,7 +434,7 @@ def _discover_providers(cfg: Any) -> list[dict]:
 
     # 3. Remote Ollama
     profiles = load_model_profiles()
-    remote_ollama_profiles = [p for p in profiles if p.provider in ("remote-ollama", "remote_ollama")]
+    remote_ollama_profiles = [p for p in profiles if _model_profile_provider(p) == "remote-ollama"]
     remote_configured = bool(remote_ollama_profiles or (cfg.provider in ("remote-ollama", "remote_ollama") and cfg.model_endpoint))
     providers.append({
         "id": "remote-ollama",
@@ -467,11 +494,33 @@ def _discover_models(cfg: Any) -> list[dict]:
     # Do not turn a stale/unavailable engine default into a selectable model.
     # The engine remains the source of truth for configuration; the UI should
     # show models that are actually discoverable and available right now.
-    active_provider = str(getattr(cfg, "provider", "") or "").strip()
+    profiles = load_model_profiles()
+    active_profile = next(
+        (profile for profile in profiles
+         if profile.id == str(getattr(cfg, "active_model_id", "") or "")),
+        None,
+    )
+    active_provider = (_model_profile_provider(active_profile)
+                       if active_profile is not None
+                       else str(getattr(cfg, "provider", "") or "").strip())
     active_model = str(getattr(cfg, "model", "") or "").strip()
     active_id = f"{active_provider}:{active_model}"
     if active_provider and active_model and active_id not in seen_ids:
-        avail, _reason = _check_model_available(active_provider, active_model, cfg)
+        active_cfg = cfg
+        if active_profile is not None:
+            active_cfg = dataclasses.replace(
+                cfg,
+                provider=active_provider,
+                ollama_url=(active_profile.base_url
+                            if active_provider in ("ollama", "remote-ollama")
+                            else cfg.ollama_url),
+                ollama_auth_env=(active_profile.api_key_env
+                                 if active_provider in ("ollama", "remote-ollama")
+                                 else cfg.ollama_auth_env),
+                model_endpoint=active_profile.base_url,
+                api_key_env=active_profile.api_key_env,
+            )
+        avail, _reason = _check_model_available(active_provider, active_model, active_cfg)
         if avail:
             seen_ids.add(active_id)
             models.append({
@@ -514,14 +563,16 @@ def _discover_models(cfg: Any) -> list[dict]:
 
     # 4. Model Profiles from SysAI config.toml
     try:
-        for profile in load_model_profiles():
-            m_id = f"{profile.provider}:{profile.name}"
+        for profile in profiles:
+            provider = _model_profile_provider(profile)
+            m_id = f"{provider}:{profile.name}"
             if m_id in seen_ids:
                 continue
             seen_ids.add(m_id)
             candidate = dataclasses.replace(
-                cfg, provider=profile.provider, model=profile.name,
-                ollama_url=profile.base_url if profile.provider == "ollama" else cfg.ollama_url,
+                cfg, provider=provider, model=profile.name,
+                ollama_url=profile.base_url if provider in ("ollama", "remote-ollama") else cfg.ollama_url,
+                ollama_auth_env=profile.api_key_env if provider in ("ollama", "remote-ollama") else cfg.ollama_auth_env,
                 model_endpoint=profile.base_url, api_key_env=profile.api_key_env,
                 active_model_id=profile.id
             )
@@ -529,13 +580,13 @@ def _discover_models(cfg: Any) -> list[dict]:
             models.append({
                 "id": m_id,
                 "name": profile.name,
-                "provider": profile.provider,
+                "provider": provider,
                 "display_name": f"{profile.name} ({profile.id})",
                 "available": avail,
                 "unavailable_reason": reason if not avail else None,
                 "context_window": None,
                 "capabilities": ["streaming"],
-                "local": profile.provider == "ollama",
+                "local": provider == "ollama",
                 "metadata": {"profile_id": profile.id, "base_url": profile.base_url},
             })
     except Exception:
