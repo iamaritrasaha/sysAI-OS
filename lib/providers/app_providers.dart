@@ -576,11 +576,13 @@ class RunExecutor {
   final Ref _ref;
   final Map<String, StreamSubscription<Map<String, dynamic>>> _subscriptions =
       {};
+  bool _disposed = false;
 
   RunExecutor(this._ref);
 
   /// Starts executing a run by submitting its goal to the bridge.
   Future<void> execute(String runId) async {
+    if (_disposed) return;
     final runs = _ref.read(runListProvider).valueOrNull ?? [];
     Run? run;
     try {
@@ -600,6 +602,7 @@ class RunExecutor {
         events: run.events,
       ),
     );
+    if (_disposed) return;
 
     final stream = bridge.callStreaming(
       'execute_run',
@@ -614,8 +617,11 @@ class RunExecutor {
     );
 
     final sub = stream.listen(
-      (event) => _handleEvent(runId, event),
+      (event) {
+        if (!_disposed) unawaited(_handleEvent(runId, event));
+      },
       onError: (e) async {
+        if (_disposed) return;
         final current = _ref.read(runByIdProvider(runId));
         if (current != null) {
           await _updateRun(
@@ -639,6 +645,7 @@ class RunExecutor {
   /// executing independently; the cursor makes this a replay-plus-live
   /// subscription rather than a second execution request.
   Future<void> reconnectActiveRuns() async {
+    if (_disposed) return;
     final runs = _ref.read(runListProvider).valueOrNull ?? const <Run>[];
     final bridge = _ref.read(bridgeServiceProvider);
     if (!bridge.isReady) return;
@@ -653,7 +660,9 @@ class RunExecutor {
         params: {'run_id': run.id, 'after_event_id': lastEventId},
       );
       _subscriptions[run.id] = stream.listen(
-        (event) => _handleEvent(run.id, event),
+        (event) {
+          if (!_disposed) unawaited(_handleEvent(run.id, event));
+        },
         onError: (_) => _subscriptions.remove(run.id),
         onDone: () => _subscriptions.remove(run.id),
       );
@@ -748,6 +757,7 @@ class RunExecutor {
   }
 
   Future<void> _handleEvent(String runId, Map<String, dynamic> event) async {
+    if (_disposed) return;
     final current = _ref.read(runByIdProvider(runId));
     if (current == null) return;
 
@@ -786,6 +796,7 @@ class RunExecutor {
     }
 
     final repo = await _ref.read(runRepositoryProvider.future);
+    if (_disposed) return;
 
     // Phase 3 session aggregation — terminal/browser events update their
     // own durable summaries in addition to flowing into `run.events` below
@@ -812,6 +823,7 @@ class RunExecutor {
         _handleComputerActionRequested(current, taskId, event, timestamp, repo),
       );
     }
+    if (_disposed) return;
 
     // 1. Create structured RunEvent
     final newEvent = RunEvent(
@@ -857,6 +869,7 @@ class RunExecutor {
         runId: runId,
         urgency: 'critical',
       );
+      if (_disposed) return;
     } else if (type == 'approval.resolved') {
       final approved = event['approved'] as bool? ?? false;
       if (updated.pendingApproval != null) {
@@ -981,7 +994,7 @@ class RunExecutor {
       );
     }
 
-    await _updateRun(updated);
+    if (!_disposed) await _updateRun(updated);
   }
 
   Future<void> _notify({
@@ -991,6 +1004,7 @@ class RunExecutor {
     String? runId,
     String urgency = 'normal',
   }) async {
+    if (_disposed) return;
     // The canonical runtime persists and produces native notifications. The
     // Flutter-side copy is retained only for isolated/legacy repositories.
     final bridge = _ref.read(bridgeServiceProvider);
@@ -1289,6 +1303,7 @@ class RunExecutor {
   }
 
   void dispose() {
+    _disposed = true;
     for (final sub in _subscriptions.values) {
       sub.cancel();
     }
@@ -1296,7 +1311,11 @@ class RunExecutor {
   }
 }
 
-final runExecutorProvider = Provider((ref) => RunExecutor(ref));
+final runExecutorProvider = Provider((ref) {
+  final executor = RunExecutor(ref);
+  ref.onDispose(executor.dispose);
+  return executor;
+});
 
 // ── Experience Provider ───────────────────────────────────────────────────────
 

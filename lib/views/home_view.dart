@@ -509,15 +509,12 @@ class _TargetChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
-    return InkWell(
-      onTap: onTap,
-      overlayColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.pressed)) return onSurface.withAlpha(24);
-        if (states.contains(WidgetState.hovered)) return onSurface.withAlpha(10);
-        return null;
-      }),
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
           color: onSurface.withAlpha(10),
@@ -527,6 +524,7 @@ class _TargetChip extends StatelessWidget {
         child: Text(
           label,
           style: TextStyle(fontSize: 11, color: onSurface.withAlpha(180)),
+        ),
         ),
       ),
     );
@@ -664,15 +662,12 @@ class _ActiveRunCard extends StatelessWidget {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final primary = Theme.of(context).colorScheme.primary;
 
-    return InkWell(
-      onTap: onTap,
-      overlayColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.pressed)) return primary.withAlpha(32);
-        if (states.contains(WidgetState.hovered)) return primary.withAlpha(16);
-        return null;
-      }),
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
         margin: const EdgeInsets.only(bottom: Space.sm),
         padding: const EdgeInsets.all(Space.lg),
         decoration: BoxDecoration(
@@ -741,6 +736,7 @@ class _ActiveRunCard extends StatelessWidget {
             ],
           ],
         ),
+        ),
       ),
     );
   }
@@ -758,15 +754,12 @@ class _RecentRunRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
 
-    return InkWell(
-      onTap: onTap,
-      overlayColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.pressed)) return onSurface.withAlpha(22);
-        if (states.contains(WidgetState.hovered)) return onSurface.withAlpha(8);
-        return null;
-      }),
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
         margin: const EdgeInsets.only(bottom: 6),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
@@ -813,6 +806,7 @@ class _RecentRunRow extends StatelessWidget {
             const SizedBox(width: 8),
             Icon(Icons.chevron_right, size: 16, color: onSurface.withAlpha(80)),
           ],
+        ),
         ),
       ),
     );
