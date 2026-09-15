@@ -1,0 +1,3 @@
+# SysAI bridge — pure stdlib, no external dependencies needed.
+# The bridge imports SysAI directly using the discovered SYSAI_PATH.
+# SysAI itself may depend on tomllib (Python 3.11+ stdlib).

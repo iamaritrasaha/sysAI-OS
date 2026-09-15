@@ -28,7 +28,7 @@ SysAI_OS locates the SysAI Python source tree using:
    ```bash
    echo "/path/to/sysai/src" > .sysai_path
    ```
-3. **Automatic fallback**: Discovers standard sibling paths such as `/media/hrik/Hrik/Projects/sysai/src`.
+3. **Automatic fallback**: Discovers standard sibling checkouts relative to wherever this repository is cloned, e.g. `<repo-parent>/Projects/sysai/src` or `../SysAI/src`.
 
 ---
 
@@ -74,6 +74,29 @@ SysAI OS discovers providers and models live from the connected SysAI installati
 - **JetBrains Mono** (SIL OFL 1.1) for anything that's literally code: model ids, file paths, shell commands, terminal/event-log output. Bundled at `assets/fonts/JetBrainsMono-*.ttf`; license at `assets/fonts/JetBrainsMono-OFL.txt`.
 - Both are declared directly in `pubspec.yaml` and loaded from local assets — no network font fetch at runtime.
 - Semantic text styles live in `lib/theme/typography.dart` (`AppText.pageTitle`, `AppText.body`, `AppText.code`, ...) instead of ad hoc `TextStyle`s; shared spacing/radii/icon-size tokens live in `lib/theme/tokens.dart`. Status color/label/icon mapping (Run lifecycle) is centralized in `lib/theme/status.dart` — previously duplicated with three different colors per state across Home, Runs, and Run Detail.
+
+---
+
+## Phase 3: Native Agentic Workspace
+
+SysAI OS gained three new operational surfaces, all going through the same Capability Registry → Policy Engine path as everything else — nothing bypasses policy.
+
+- **Terminal**: `shell.execute` now streams structured `terminal.session.created` / `terminal.output` / `terminal.session.completed` events instead of returning one blob at the end. Output lines are **never persisted individually** — they live in a bounded (500-line) in-memory buffer (`terminalLiveOutputProvider`) that a chatty command can't turn into thousands of SQLite writes. Only the session summary (command, cwd, status, exit code, a bounded output preview) is durable, in the new `terminal_sessions` table. Cancellation registers the process with `ExecutionController` *before* the blocking wait, not after, so `cancel_run()` can actually kill a still-running command.
+- **Browser**: a read-mostly capability layer (`bridge/capabilities/browser.py`) — `browser.search` / `.navigate` / `.read` / `.follow_link` / `.download` / `.capture`. Fetches over HTTP and extracts title/text/links with the stdlib `html.parser`; this is **not** a headless rendering browser, and `browser.capture` persists a text/HTML snapshot, not a screenshot. Search uses DuckDuckGo's lite endpoint with a browser User-Agent (the default endpoint serves an anti-bot page to non-browser clients). One `BrowserSession` per Run aggregates navigation history in `browser_sessions`. Downloads are approval-gated and sandboxed to the workspace (defense-in-depth: checked both by the Policy Engine and by the handler itself).
+- **Computer** (Phase 3 scope): observation/capture against the host desktop and honestly-reported placeholders for input. Superseded by Phase 4's Controlled Computer Use, below.
+- **Background Runs**: `runExecutorProvider` is a plain (non-`autoDispose`) Riverpod `Provider`, so a Run's event-stream subscription lives with the app session, not with the Run Detail screen — navigating away never stops it. The Shell footer shows global active-Run and pending-approval counts regardless of the current page.
+- **Notifications**: a `Notification` domain, distinct from the Activity timeline (Activity = what happened; notifications = what needs/needed attention) — fired only for approval-required, run-completed, run-failed, and run-interrupted, persisted in `notifications`, and mirrored to Linux desktop notifications via `notify-send` (zero new dependencies; silently skipped if unavailable). An in-app bell in the Shell shows unread count and opens a short list.
+- Schema `V3 → V4` adds `terminal_sessions`, `browser_sessions`, and `notifications`, idempotently, preserving every existing Run/approval/artifact/checkpoint/setting.
+
+---
+
+## Phase 4: Persistent Automations & Controlled Computer Use
+
+- **Automations**: `ScheduledAutomation` (once/interval/daily/weekly) persists a goal, workspace, and provider/model — firing one creates a normal `Run` through the exact same pipeline a manual Run uses. DST-safe scheduling via `package:timezone`; duplicate-trigger protection via a `UNIQUE(automation_id, occurrence_key)` claim table; a deterministic, documented missed-trigger policy (a `once` fires within a 15-minute grace window or is marked missed, a recurring automation catches up once and recomputes past `now`). One central 30-second timer, never one per automation. Manage from the **Automations** tab: create, edit, enable/disable, run now, delete, and see next run / last result / linked past Runs.
+- **Controlled Computer Use** — explicitly not unrestricted desktop automation. Real `observe`/`capture`/`click`/`type`/`key`/`scroll` actions execute against exactly one registered, SysAI-owned target: a deterministic Flutter test surface (**Computer** tab). Since the Python bridge can't reach the live widget tree, an action is a request/block/resolve round-trip (mirroring the existing approval flow) — Flutter executes the real widget callback and reports the result back. Any other target is denied outright by the Policy Engine, on target identity. `type`/`key` still require approval even against the registered target. Captures use Flutter's own `RenderRepaintBoundary.toImage()`, not an OS screenshot tool.
+- **Workspace selection**: `Run.workspacePath` / the bridge's `workspace_root` parameter are now wired through for every Run (manual or scheduled) — previously silently defaulted for all Runs.
+- The Scheduler and any in-flight Run run only while the SysAI OS process is alive — see `docs/lifecycle.md`. This is not a background daemon.
+- Schema `V4 → V5` adds `scheduled_automations`, `automation_occurrences`, `computer_sessions`, `computer_actions`, and a `workspace_path` column on `runs`, idempotently, preserving every existing row. See `docs/ARCHITECTURE.md` §8 for the full design.
 
 ---
 
