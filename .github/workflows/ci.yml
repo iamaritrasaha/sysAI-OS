@@ -96,6 +96,7 @@ jobs:
         with:
           repository: ${{ env.SYSAI_REPO }}
           ref: ${{ env.SYSAI_REF }}
+          with-ollama: 'false'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2

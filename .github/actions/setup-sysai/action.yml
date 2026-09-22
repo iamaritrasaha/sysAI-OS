@@ -13,6 +13,10 @@ inputs:
     description: 'Local directory to check out SysAI'
     required: false
     default: '.sysai-engine'
+  with-ollama:
+    description: 'Whether to install and start local Ollama service with a test model'
+    required: false
+    default: 'true'
 runs:
   using: 'composite'
   steps:
@@ -32,3 +36,32 @@ runs:
         echo "${ENGINE_DIR}/src" > "${{ github.workspace }}/.sysai_path"
         echo "[setup-sysai] Provisioned SysAI engine from ${{ inputs.repository }}@${{ inputs.ref }}"
         echo "[setup-sysai] SYSAI_PATH=${ENGINE_DIR}/src"
+
+    - name: Provision Local Ollama
+      if: ${{ inputs.with-ollama == 'true' }}
+      shell: bash
+      run: |
+        if ! command -v ollama &>/dev/null; then
+          echo "[setup-sysai] Installing Ollama..."
+          curl -fsSL https://ollama.com/install.sh | sh
+        fi
+        if ! curl -s http://127.0.0.1:11434/api/version >/dev/null; then
+          if command -v systemctl &>/dev/null && [ "$(systemctl is-system-running 2>/dev/null || true)" = "running" ]; then
+            sudo systemctl restart ollama || true
+          fi
+        fi
+        if ! curl -s http://127.0.0.1:11434/api/version >/dev/null; then
+          echo "[setup-sysai] Starting Ollama serve in background..."
+          ollama serve >/tmp/ollama.log 2>&1 &
+        fi
+        for i in {1..30}; do
+          if curl -s http://127.0.0.1:11434/api/version >/dev/null; then
+            echo "[setup-sysai] Ollama service is up"
+            break
+          fi
+          sleep 0.5
+        done
+        echo "[setup-sysai] Pulling all-minilm..."
+        ollama pull all-minilm
+        echo "[setup-sysai] Ollama ready with models:"
+        ollama list
