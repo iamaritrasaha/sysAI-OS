@@ -174,7 +174,21 @@ abstract final class SysAIConfig {
       } catch (_) {}
     }
 
-    // 4. Fallback
+    // 4. Installed in active Python environment
+    try {
+      final res = Process.runSync(
+        python3Executable,
+        ['-c', 'import sysai, os; print(os.path.dirname(os.path.dirname(sysai.__file__)))'],
+      );
+      if (res.exitCode == 0) {
+        final path = (res.stdout as String).trim();
+        if (path.isNotEmpty && Directory(p.join(path, 'sysai')).existsSync()) {
+          return path;
+        }
+      }
+    } catch (_) {}
+
+    // 5. Fallback
     return defaultSysAIPath;
   }
 

@@ -11,7 +11,11 @@ PREFIX="${HOME}/.local"
 SYSAI_SRC=""
 INSTALL_SERVICE=true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUNDLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"  # one level up from install/
+if [[ -d "${SCRIPT_DIR}/app" || -d "${SCRIPT_DIR}/runtime" || -d "${SCRIPT_DIR}/bridge" ]]; then
+    BUNDLE_DIR="${SCRIPT_DIR}"
+else
+    BUNDLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "[install] $*"; }
@@ -62,9 +66,9 @@ mkdir -p "${DATA_DIR}" "${BIN_DIR}" "${APPS_DIR}" "${APP_DIR}" "${RUNTIME_DEST}"
 # Look for built app in standard Flutter build output locations
 FLUTTER_BUNDLE=""
 for candidate in \
+    "${BUNDLE_DIR}/app" \
     "${BUNDLE_DIR}/build/linux/x64/release/bundle" \
-    "${BUNDLE_DIR}/build/linux/arm64/release/bundle" \
-    "${BUNDLE_DIR}/app"; do
+    "${BUNDLE_DIR}/build/linux/arm64/release/bundle"; do
     if [[ -d "${candidate}" && -x "${candidate}/sysai" ]]; then
         FLUTTER_BUNDLE="${candidate}"
         break
@@ -82,10 +86,18 @@ else
 fi
 
 # ── Copy runtime Python files ─────────────────────────────────────────────────
-BRIDGE_SRC="${BUNDLE_DIR}/bridge"
-[[ -d "${BRIDGE_SRC}" ]] || die "Bridge directory not found at ${BRIDGE_SRC}"
+BRIDGE_SRC=""
+for candidate in \
+    "${BUNDLE_DIR}/runtime" \
+    "${BUNDLE_DIR}/bridge"; do
+    if [[ -d "${candidate}" ]]; then
+        BRIDGE_SRC="${candidate}"
+        break
+    fi
+done
+[[ -n "${BRIDGE_SRC}" ]] || die "Bridge/runtime directory not found in ${BUNDLE_DIR}"
 
-info "Copying runtime files..."
+info "Copying runtime files from ${BRIDGE_SRC}..."
 for f in \
     sysai_os_runtime.py sysai_bridge.py sysai_runner.py \
     sysai_paths.py sysai_logging.py sandbox.py \
@@ -141,19 +153,28 @@ chmod +x "${WRAPPER}"
 info "Launcher installed to ${WRAPPER}"
 
 # ── Install .desktop file ─────────────────────────────────────────────────────
-cp "${SCRIPT_DIR}/sysai-os.desktop" "${APPS_DIR}/sysai-os.desktop"
-if command -v update-desktop-database &>/dev/null; then
-    update-desktop-database "${APPS_DIR}" 2>/dev/null || true
+DESKTOP_SRC=""
+MANAGE_SVC=""
+for candidate in "${SCRIPT_DIR}" "${SCRIPT_DIR}/install" "${BUNDLE_DIR}/install"; do
+    [[ -z "${DESKTOP_SRC}" && -f "${candidate}/sysai-os.desktop" ]] && DESKTOP_SRC="${candidate}/sysai-os.desktop"
+    [[ -z "${MANAGE_SVC}" && -f "${candidate}/manage-service.sh" ]] && MANAGE_SVC="${candidate}/manage-service.sh"
+done
+
+if [[ -n "${DESKTOP_SRC}" ]]; then
+    cp "${DESKTOP_SRC}" "${APPS_DIR}/sysai-os.desktop"
+    if command -v update-desktop-database &>/dev/null; then
+        update-desktop-database "${APPS_DIR}" 2>/dev/null || true
+    fi
+    info "Desktop entry installed to ${APPS_DIR}/sysai-os.desktop"
 fi
-info "Desktop entry installed to ${APPS_DIR}/sysai-os.desktop"
 
 # ── Optionally install systemd service ────────────────────────────────────────
 if [[ "${INSTALL_SERVICE}" == true ]]; then
-    if command -v systemctl &>/dev/null; then
+    if [[ -n "${MANAGE_SVC}" ]] && command -v systemctl &>/dev/null; then
         info "Installing systemd user service..."
-        "${SCRIPT_DIR}/manage-service.sh" install || \
+        "${MANAGE_SVC}" install || \
             info "WARNING: systemd service install failed (non-fatal, run manage-service.sh install later)"
-    else
+    elif ! command -v systemctl &>/dev/null; then
         info "systemctl not available — skipping service installation."
     fi
 fi

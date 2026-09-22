@@ -14,12 +14,10 @@ class TestBridgeIntegration(unittest.TestCase):
     def setUp(self) -> None:
         self.bridge_script = Path(__file__).resolve().parent.parent / "sysai_bridge.py"
         self.project_root = Path(__file__).resolve().parent.parent.parent
-        # SYSAI_PATH env var wins if set; otherwise fall back to the same
-        # sibling-directory convention sysai_bridge.py's own discovery
-        # tries (`<repo-parent>/Projects/sysai/src`) — a portable
-        # structural guess, not one developer's absolute home directory.
+        from sysai_bridge import _find_sysai_path
+        detected = _find_sysai_path()
         self.sysai_path = os.environ.get(
-            "SYSAI_PATH", str(self.project_root.parent.parent / "Projects" / "sysai" / "src")
+            "SYSAI_PATH", str(detected) if detected else str(self.project_root.parent.parent / "Projects" / "sysai" / "src")
         )
 
     def test_bridge_ping_and_capabilities(self) -> None:
@@ -36,9 +34,17 @@ class TestBridgeIntegration(unittest.TestCase):
         )
 
         try:
-            # 1. Read ready message
-            ready_line = proc.stdout.readline()
-            ready_data = json.loads(ready_line)
+            # 1. Read ready message (allowing preceding informational/warn messages)
+            ready_data = None
+            for _ in range(5):
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                data = json.loads(line)
+                if data.get("type") == "ready":
+                    ready_data = data
+                    break
+            self.assertIsNotNone(ready_data, "Bridge did not emit ready message")
             self.assertEqual(ready_data.get("type"), "ready")
             self.assertEqual(ready_data.get("bridge_version"), "2.0.0")
 

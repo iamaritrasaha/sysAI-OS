@@ -1,0 +1,34 @@
+name: 'Setup SysAI Engine'
+description: 'Provisions the SysAI engine dependency at a pinned commit'
+inputs:
+  repository:
+    description: 'SysAI repository'
+    required: false
+    default: 'iamaritrasaha/sysai'
+  ref:
+    description: 'SysAI git commit or tag'
+    required: false
+    default: 'db4c68ce263e0fad4eff2ea64dd9b92f8f55a136'
+  path:
+    description: 'Local directory to check out SysAI'
+    required: false
+    default: '.sysai-engine'
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout SysAI Engine
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        path: ${{ inputs.path }}
+
+    - name: Provision SysAI Engine
+      shell: bash
+      run: |
+        ENGINE_DIR="${{ github.workspace }}/${{ inputs.path }}"
+        pip install "${ENGINE_DIR}"
+        echo "SYSAI_PATH=${ENGINE_DIR}/src" >> $GITHUB_ENV
+        echo "${ENGINE_DIR}/src" > "${{ github.workspace }}/.sysai_path"
+        echo "[setup-sysai] Provisioned SysAI engine from ${{ inputs.repository }}@${{ inputs.ref }}"
+        echo "[setup-sysai] SYSAI_PATH=${ENGINE_DIR}/src"

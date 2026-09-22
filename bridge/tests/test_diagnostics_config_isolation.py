@@ -23,11 +23,13 @@ BRIDGE_DIR = Path(__file__).resolve().parent.parent
 if str(BRIDGE_DIR) not in sys.path:
     sys.path.insert(0, str(BRIDGE_DIR))
 
-# SYSAI_PATH env var wins if set; otherwise the same portable
-# sibling-directory guess sysai_bridge.py's own discovery tries
-# (`<repo-parent>/Projects/sysai/src`), not one developer's home directory.
+import sysai_bridge
+_detected = sysai_bridge._find_sysai_path()
 _REPO_ROOT = BRIDGE_DIR.parent
-SYSAI_PATH = os.environ.get("SYSAI_PATH", str(_REPO_ROOT.parent.parent / "Projects" / "sysai" / "src"))
+SYSAI_PATH = os.environ.get(
+    "SYSAI_PATH",
+    str(_detected) if _detected else str(_REPO_ROOT.parent.parent / "Projects" / "sysai" / "src"),
+)
 if SYSAI_PATH not in sys.path:
     sys.path.insert(0, SYSAI_PATH)
 

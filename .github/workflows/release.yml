@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
 
+env:
+  SYSAI_REPO: 'iamaritrasaha/sysai'
+  SYSAI_REF: 'db4c68ce263e0fad4eff2ea64dd9b92f8f55a136'
+
 jobs:
   build-and-package:
     name: Build and package Linux release
@@ -18,6 +22,17 @@ jobs:
           sudo apt-get install -y \
             clang cmake ninja-build pkg-config \
             libgtk-3-dev liblzma-dev libstdc++-12-dev rsync
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Provision SysAI Engine
+        uses: ./.github/actions/setup-sysai
+        with:
+          repository: ${{ env.SYSAI_REPO }}
+          ref: ${{ env.SYSAI_REF }}
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -38,7 +53,7 @@ jobs:
       - name: Package tarball
         run: |
           chmod +x install/package.sh
-          ./install/package.sh --version ${{ steps.version.outputs.VERSION }}
+          ./install/package.sh --version ${{ steps.version.outputs.VERSION }} --sysai-src .sysai-engine
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4

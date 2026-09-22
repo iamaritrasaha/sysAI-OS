@@ -87,6 +87,18 @@ def _find_sysai_path() -> Path | None:
     except ImportError:
         pass  # sysai_paths not available (very early bootstrap)
 
+    # 5. Active Python environment (e.g. installed package in site-packages or venv)
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("sysai")
+        if spec and spec.origin:
+            pkg_dir = Path(spec.origin).parent
+            container = pkg_dir.parent
+            if (container / "sysai").is_dir():
+                return container
+    except Exception:
+        pass
+
     return None
 
 

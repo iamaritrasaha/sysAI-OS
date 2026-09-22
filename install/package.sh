@@ -5,15 +5,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-VERSION="${1:-}"
+VERSION=""
 ARCH=$(uname -m)
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "[package] $*"; }
 
+SYSAI_SRC=""
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --version) VERSION="$2"; shift 2 ;;
+        --version)   VERSION="$2"; shift 2 ;;
+        --sysai-src) SYSAI_SRC="$2"; shift 2 ;;
         *) die "Unknown argument: $1" ;;
     esac
 done
@@ -67,6 +70,13 @@ chmod +x "${DIST_DIR}/install/"*.sh 2>/dev/null || true
 cp "${SCRIPT_DIR}/install.sh"   "${DIST_DIR}/install.sh"
 cp "${SCRIPT_DIR}/uninstall.sh" "${DIST_DIR}/uninstall.sh"
 chmod +x "${DIST_DIR}/install.sh" "${DIST_DIR}/uninstall.sh"
+
+# Bundle SysAI engine if provided
+if [[ -n "${SYSAI_SRC}" && -d "${SYSAI_SRC}" ]]; then
+    info "Bundling SysAI engine from ${SYSAI_SRC}..."
+    SRC_ABS=$(cd "${SYSAI_SRC}" && pwd)
+    tar -czf "${DIST_DIR}/sysai_engine.tar.gz" -C "$(dirname "${SRC_ABS}")" "$(basename "${SRC_ABS}")"
+fi
 
 # Release notes
 cat > "${DIST_DIR}/RELEASE.md" << REOF

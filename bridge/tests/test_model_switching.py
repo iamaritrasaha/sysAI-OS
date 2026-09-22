@@ -14,10 +14,10 @@ class TestModelSwitching(unittest.TestCase):
     def setUp(self) -> None:
         self.bridge_script = Path(__file__).resolve().parent.parent / "sysai_bridge.py"
         project_root = Path(__file__).resolve().parent.parent.parent
-        # SYSAI_PATH env var wins if set; otherwise the same portable
-        # sibling-directory guess sysai_bridge.py's own discovery tries.
+        from sysai_bridge import _find_sysai_path
+        detected = _find_sysai_path()
         self.sysai_path = os.environ.get(
-            "SYSAI_PATH", str(project_root.parent.parent / "Projects" / "sysai" / "src")
+            "SYSAI_PATH", str(detected) if detected else str(project_root.parent.parent / "Projects" / "sysai" / "src")
         )
         self.env = dict(os.environ)
         self.env["SYSAI_PATH"] = self.sysai_path
@@ -31,8 +31,16 @@ class TestModelSwitching(unittest.TestCase):
             text=True,
             env=self.env,
         )
-        ready_line = proc.stdout.readline()
-        ready_data = json.loads(ready_line)
+        ready_data = None
+        for _ in range(5):
+            line = proc.stdout.readline()
+            if not line:
+                break
+            data = json.loads(line)
+            if data.get("type") == "ready":
+                ready_data = data
+                break
+        self.assertIsNotNone(ready_data, "Bridge did not emit ready message")
         self.assertEqual(ready_data.get("type"), "ready")
         return proc
 

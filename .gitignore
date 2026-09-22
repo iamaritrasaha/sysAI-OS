@@ -101,3 +101,4 @@ bridge/policy/__pycache__/
 
 # Smoke test and CI staging
 .smoke_test/
+.sysai-engine/
