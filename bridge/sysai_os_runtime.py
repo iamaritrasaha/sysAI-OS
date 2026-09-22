@@ -31,6 +31,13 @@ from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+try:
+    from sysai_paths import PATHS as _PATHS
+    from sysai_logging import configure_logging
+except ImportError:
+    _PATHS = None
+    configure_logging = None
+
 PROTOCOL_VERSION = "1"
 RUNTIME_VERSION = "1.0.0"
 MAX_MESSAGE_BYTES = 1024 * 1024
@@ -48,6 +55,8 @@ def _now() -> str:
 
 
 def default_runtime_dir() -> Path:
+    if _PATHS is not None:
+        return _PATHS.runtime_dir()
     configured = os.environ.get("SYSAI_RUNTIME_DIR", "").strip()
     if configured:
         return Path(configured).expanduser()
@@ -58,6 +67,8 @@ def default_runtime_dir() -> Path:
 
 
 def default_db_path() -> Path:
+    if _PATHS is not None:
+        return _PATHS.db_path()
     configured = os.environ.get("SYSAI_RUNTIME_DB", "").strip()
     if configured:
         return Path(configured).expanduser()
@@ -420,12 +431,19 @@ class Runtime:
             path = sysai_bridge.SYSAI_PATH_USED
         except Exception:
             available, version, path = False, "unknown", None
+        sandbox_state = "unknown"
+        try:
+            from sandbox import get_sandbox_state
+            sandbox_state = get_sandbox_state().value
+        except Exception:
+            pass
         return {
             "type": "ready", "protocol_version": PROTOCOL_VERSION,
             "runtime_version": RUNTIME_VERSION, "pid": os.getpid(),
             "uptime_seconds": 0, "started_at": dt.datetime.fromtimestamp(self.started_at, dt.timezone.utc).isoformat(),
             "scheduler_running": True, "sysai_available": available,
             "sysai_version": version, "sysai_path": path,
+            "sandbox_state": sandbox_state,
         }
 
     def broadcast(self, message: dict, run_id: Optional[str] = None) -> None:
@@ -862,7 +880,19 @@ def main() -> int:
     try: fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return 2
-    runtime = Runtime(args.socket, args.db)
+
+    # Configure centralized logging as early as possible
+    if configure_logging is not None:
+        configure_logging()
+
+    # EX_CONFIG (78): configuration error — systemd will not restart
+    EX_CONFIG = 78
+
+    try:
+        runtime = Runtime(args.socket, args.db)
+    except RuntimeError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return EX_CONFIG
     def stop(_sig, _frame): runtime.request_shutdown()
     signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
     runtime.run()

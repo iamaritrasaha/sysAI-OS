@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=SysAI OS
+Comment=Agentic OS — AI-powered desktop workspace
+Icon=sysai-os
+Exec=%h/.local/share/sysai-os/app/sysai
+Terminal=false
+Categories=Utility;Development;
+Keywords=ai;agent;workspace;
+StartupNotify=true
+StartupWMClass=sysai

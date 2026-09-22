@@ -21,7 +21,10 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
+import threading
 from typing import Any, Dict, List, Optional
+
+class CancelledError(Exception): pass
 
 # Some sites (including DuckDuckGo's lite search endpoint) serve a
 # degraded/blocked response to non-browser User-Agents. A realistic UA is
@@ -34,7 +37,7 @@ _ACCEPT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 _MAX_BYTES = 2_000_000  # Refuse to buffer more than ~2MB of a page in memory.
-_FETCH_TIMEOUT = 15
+_FETCH_TIMEOUT = 10
 _MAX_TEXT_CHARS = 20_000  # What we keep in memory / hand back to the caller.
 _MAX_LINKS = 40
 
@@ -117,29 +120,54 @@ class _PageTextExtractor(HTMLParser):
         return "\n".join(self.text_parts)[:_MAX_TEXT_CHARS]
 
 
-def _fetch(url: str) -> Dict[str, Any]:
+def _fetch(url: str, cancel_flag=None) -> Dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"Refusing to fetch non-HTTP(S) URL: {url!r}")
 
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, **_ACCEPT_HEADERS})
-    with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT) as response:
-        content_type = response.headers.get("Content-Type", "")
-        raw = response.read(_MAX_BYTES + 1)
-        truncated = len(raw) > _MAX_BYTES
-        raw = raw[:_MAX_BYTES]
-        charset = response.headers.get_content_charset() or "utf-8"
+
+    result: List[Dict[str, Any]] = []
+    error: List[Exception] = []
+
+    def _do_fetch() -> None:
         try:
-            body = raw.decode(charset, errors="replace")
-        except LookupError:
-            body = raw.decode("utf-8", errors="replace")
-        return {
-            "status_code": response.status,
-            "content_type": content_type,
-            "body": body,
-            "truncated": truncated,
-            "final_url": response.geturl(),
-        }
+            with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT) as response:
+                content_type = response.headers.get("Content-Type", "")
+                raw = response.read(_MAX_BYTES + 1)
+                truncated = len(raw) > _MAX_BYTES
+                raw = raw[:_MAX_BYTES]
+                charset = response.headers.get_content_charset() or "utf-8"
+                try:
+                    body = raw.decode(charset, errors="replace")
+                except LookupError:
+                    body = raw.decode("utf-8", errors="replace")
+                result.append({
+                    "status_code": response.status,
+                    "content_type": content_type,
+                    "body": body,
+                    "truncated": truncated,
+                    "final_url": response.geturl(),
+                })
+        except Exception as exc:
+            error.append(exc)
+
+    t = threading.Thread(target=_do_fetch, daemon=True)
+    t.start()
+
+    # Poll for completion, checking cancellation every second
+    while t.is_alive():
+        t.join(timeout=1.0)
+        if t.is_alive() and cancel_flag is not None and cancel_flag.is_set():
+            # Cancel flag raised — the thread is still running but we stop waiting.
+            # The OS will eventually clean up the socket when the daemon thread exits.
+            raise CancelledError("Browser fetch cancelled by run cancellation")
+
+    if error:
+        raise error[0]
+    if not result:
+        raise RuntimeError("Fetch returned no result")
+    return result[0]
 
 
 def _extract(body: str) -> _PageTextExtractor:
@@ -166,8 +194,13 @@ def handle_browser_navigate(params: Dict[str, Any], context: Dict[str, Any]) -> 
         emit({"type": "browser.session.created", "run_id": run_id, "session_id": session_id})
         emit({"type": "browser.navigation.started", "run_id": run_id, "session_id": session_id, "url": url})
 
+    cancel_flag = context.get("cancel_flag")
     try:
-        fetched = _fetch(url)
+        fetched = _fetch(url, cancel_flag=cancel_flag)
+    except CancelledError:
+        if emit:
+            emit({"type": "browser.cancelled", "run_id": run_id, "session_id": session_id, "url": url})
+        return {"error": "Fetch cancelled", "success": False, "cancelled": True, "session_id": session_id}
     except (urllib.error.URLError, ValueError, TimeoutError) as exc:
         # `socket.timeout`/`TimeoutError` and a generic `URLError` both
         # surface here; distinguish them explicitly rather than folding
@@ -359,12 +392,35 @@ def handle_browser_download(params: Dict[str, Any], context: Dict[str, Any]) -> 
     if emit:
         emit({"type": "browser.download.started", "run_id": run_id, "session_id": session_id, "url": url, "path": rel_path})
 
+    cancel_flag = context.get("cancel_flag")
     try:
         request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, **_ACCEPT_HEADERS})
-        with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT) as response:
-            data = response.read(_MAX_BYTES + 1)
-            truncated = len(data) > _MAX_BYTES
-            data = data[:_MAX_BYTES]
+        # Use _fetch for cancellable download (we only need the body bytes)
+        fetched_result: List[bytes] = []
+        fetch_error: List[Exception] = []
+
+        def _do_download() -> None:
+            try:
+                with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT) as response:
+                    fetched_result.append(response.read(_MAX_BYTES + 1))
+            except Exception as exc:
+                fetch_error.append(exc)
+
+        dl_thread = threading.Thread(target=_do_download, daemon=True)
+        dl_thread.start()
+        while dl_thread.is_alive():
+            dl_thread.join(timeout=1.0)
+            if dl_thread.is_alive() and cancel_flag is not None and cancel_flag.is_set():
+                if emit:
+                    emit({"type": "browser.cancelled", "run_id": run_id, "session_id": session_id, "url": url})
+                return {"error": "Download cancelled", "success": False, "cancelled": True}
+        if fetch_error:
+            raise fetch_error[0]
+        data = fetched_result[0]
+        truncated = len(data) > _MAX_BYTES
+        data = data[:_MAX_BYTES]
+    except CancelledError:
+        return {"error": "Download cancelled", "success": False, "cancelled": True}
     except (urllib.error.URLError, ValueError, TimeoutError) as exc:
         if emit:
             emit({"type": "browser.error", "run_id": run_id, "session_id": session_id, "url": url, "error": str(exc)})

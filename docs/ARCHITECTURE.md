@@ -494,3 +494,39 @@ It is not simulated.
 
 See `docs/lifecycle.md` for startup, reconnect, close, shutdown, and future
 systemd-user integration guidance.
+
+### Phase 6 — Productionization, Packaging, Runtime Service, and Execution Isolation
+
+Phase 6 hardens SysAI OS for installation, persistence, relocatability, and execution isolation:
+
+1. **Centralized XDG Path Layer**:
+   - `bridge/sysai_paths.py` defines the canonical path authority for the Python runtime, supporting standard XDG specifications (`XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`) with environment overrides (`SYSAI_*`).
+   - `lib/config/sysai_config.dart` provides matching path and install-mode awareness on the Dart/Flutter client side.
+   - Zero hardcoded personal paths or repository-relative assumptions in production mode.
+
+2. **Dedicated Engine Virtual Environment**:
+   - Runtime dependencies and the `sysai-terminal` package are isolated in a user-local virtual environment at `~/.local/share/sysai-os/venv/`.
+   - The engine discovery mechanism (`_find_sysai_path()`) automatically discovers packages installed in this dedicated venv.
+
+3. **Systemd User Service Integration**:
+   - The runtime service runs as an unprivileged user service (`sysai-os-runtime.service`), managed via `install/manage-service.sh`.
+   - Uses `RestartPreventExitStatus=78` (`EX_CONFIG`) to prevent restart loops upon configuration or environment failure.
+   - Flutter's `BridgeService` checks for active systemd service state before attempting to spawn a child process.
+
+4. **OS-Level Shell Sandboxing (Bubblewrap)**:
+   - `bridge/sandbox.py` adds an OS-level confinement boundary around agent-initiated shell commands via `bwrap`.
+   - Four distinct privilege profiles:
+     - `OBSERVE`: Read-only workspace binding, unshared network, no `/tmp`.
+     - `WORKSPACE_WRITE`: Read-write workspace, unshared network, isolated `/tmp`.
+     - `NETWORK_ENABLED`: Read-write workspace, network enabled, isolated `/tmp`.
+     - `BUILD_TEST`: Read-write workspace, network enabled, extra toolchain directories visible.
+   - Seamless fallback when bubblewrap is unavailable, with policy approval requirements.
+
+5. **Asynchronous Browser Cancellation**:
+   - `bridge/capabilities/browser.py` executes network I/O in worker threads polled with `cancel_flag.is_set()` checks every 1.0s, raising `CancelledError` immediately when cancelled.
+   - Fetch timeout reduced to 10s.
+
+6. **Rotating Diagnostic Logging**:
+   - `bridge/sysai_logging.py` implements structured logging with `RotatingFileHandler` (5 MB maximum per file, 3 backups), default level `WARNING` (production) or `DEBUG` (`SYSAI_LOG_DEBUG=1`).
+   - Credentials and model prompts are never written to disk logs.
+

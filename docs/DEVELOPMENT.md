@@ -101,9 +101,43 @@ still supported for compatibility; desktop uses the runtime socket):
 
 ---
 
+## Phase 6 Tooling & Packaging
+
+### Testing
+```bash
+# Run all Python bridge and sandbox tests
+PYTHONPATH=bridge python3 -m unittest discover -s bridge/tests -v
+
+# Run clean-environment smoke test (verifies installation without repo deps)
+./install/smoke_test.sh --sysai-src /path/to/sysai
+```
+
+### Packaging a Release
+```bash
+# Build Flutter release bundle
+flutter build linux --release
+
+# Package tarball distribution
+./install/package.sh
+```
+
+### Managing Runtime Service
+```bash
+# Install and control user service
+./install/manage-service.sh install
+./install/manage-service.sh enable
+./install/manage-service.sh start
+./install/manage-service.sh status
+```
+
+---
+
 ## Architecture Rules to Maintain
 
 1. **Zero Modifications to SysAI**: The SysAI repository is strictly immutable. Do not write or commit any code to `sysai`.
 2. **Deterministic UI State**: The UI renders persisted `Run`, `RunTask`, and `RunEvent` data from SQLite. Ephemeral widget state must not be used for execution status.
 3. **Structured Events Only**: Never parse terminal ANSI strings or raw text to determine run status.
 4. **Desktop-First UI**: Keep interface calm, technical, and responsive. Avoid chatbot chatter aesthetics.
+5. **Relocatable & XDG Compliant**: Always resolve paths via `SysAIPaths` (Python) and `SysAIConfig` (Dart). Never hardcode machine-specific paths.
+6. **Execution Isolation**: Use Bubblewrap (`bwrap`) profiles for agent-driven shell execution.
+

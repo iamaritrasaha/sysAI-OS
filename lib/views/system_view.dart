@@ -105,13 +105,20 @@ class SystemView extends ConsumerWidget {
               child: Column(
                 children: [
                   _InfoRow(
-                    label: 'SysAI OS Frontend',
-                    value: 'Flutter 3.47.3 / Dart 3.13.3',
+                    label: 'SysAI OS',
+                    value: '1.0.0',
                   ),
                   const Divider(height: 16),
                   _InfoRow(
-                    label: 'SysAI OS Bridge',
-                    value: 'v1.0.0 (Python subprocess NDJSON protocol)',
+                    label: 'Runtime Version',
+                    value: bridge.runtimeVersion ?? 'Unknown',
+                  ),
+                  const Divider(height: 16),
+                  _InfoRow(
+                    label: 'IPC Protocol Version',
+                    value: bridge.protocolVersion != null
+                        ? 'v${bridge.protocolVersion}'
+                        : 'Unknown',
                   ),
                   const Divider(height: 16),
                   _InfoRow(
@@ -120,7 +127,7 @@ class SystemView extends ConsumerWidget {
                   ),
                   const Divider(height: 16),
                   _InfoRow(
-                    label: 'SysAI Source Location',
+                    label: 'Engine Location',
                     value: bridge.sysaiPath ?? 'Not discovered',
                     isPath: true,
                   ),
@@ -131,6 +138,13 @@ class SystemView extends ConsumerWidget {
                         sysaiConfig['config_dir'] as String? ??
                         '${Platform.environment['HOME'] ?? '~'}/.config/sysai',
                     isPath: true,
+                  ),
+                  const Divider(height: 16),
+                  _InfoRow(
+                    label: 'Shell Sandbox',
+                    value: bridge.sandboxState != null
+                        ? bridge.sandboxState!.toUpperCase()
+                        : 'UNKNOWN',
                   ),
                 ],
               ),

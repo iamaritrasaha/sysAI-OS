@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../config/sysai_config.dart';
 import '../models/capability.dart';
 import '../models/model_info.dart';
 
@@ -45,6 +46,7 @@ class BridgeService {
   String? _sysaiPath;
   String? _runtimeVersion;
   String? _protocolVersion;
+  String? _sandboxState;
   int? _runtimePid;
   String? _bridgeError;
   BridgeStatus _status = BridgeStatus.disconnected;
@@ -72,6 +74,7 @@ class BridgeService {
   String? get bridgeError => _bridgeError;
   BridgeStatus get status => _status;
   String? get socketPath => _runtimeSocket;
+  String? get sandboxState => _sandboxState;
 
   /// Non-null for the desktop client using the canonical application DB.
   /// Legacy direct callers omit this and retain the pre-registration behavior.
@@ -93,6 +96,15 @@ class BridgeService {
     _setStatus(BridgeStatus.starting);
 
     if (await _connectOnce()) return;
+
+    if (Platform.isLinux && await _trySystemdActivation()) {
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (DateTime.now().isBefore(deadline)) {
+        if (await _connectOnce()) return;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
+
     try {
       final env = Map<String, String>.from(Platform.environment)
         ..['SYSAI_PATH'] = sysaiPath
@@ -100,7 +112,7 @@ class BridgeService {
       final args = <String>[_runtimeScript!, '--socket', _runtimeSocket!];
       if (_databasePath != null) args.addAll(['--db', _databasePath!]);
       _runtimeProcess = await Process.start(
-        'python3',
+        SysAIConfig.python3Executable,
         args,
         environment: env,
         mode: ProcessStartMode.detachedWithStdio,
@@ -499,6 +511,27 @@ class BridgeService {
     if (!_statusController.isClosed) _statusController.add(status);
   }
 
+  Future<bool> _trySystemdActivation() async {
+    try {
+      final res = await Process.run('systemctl', [
+        '--user',
+        'is-active',
+        '--quiet',
+        'sysai-os-runtime.service',
+      ]);
+      if (res.exitCode == 0) return true;
+
+      final startRes = await Process.run('systemctl', [
+        '--user',
+        'start',
+        'sysai-os-runtime.service',
+      ]);
+      return startRes.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
   void _applyReadyMessage(Map<String, dynamic> json) {
     _protocolVersion = json['protocol_version'] as String?;
     _runtimeVersion = json['runtime_version'] as String?;
@@ -506,6 +539,7 @@ class BridgeService {
     _available = json['sysai_available'] == true;
     _sysaiVersion = json['sysai_version'] as String?;
     _sysaiPath = json['sysai_path'] as String?;
+    _sandboxState = json['sandbox_state'] as String?;
     if (_protocolVersion != null && _protocolVersion != '1') {
       _ready = false;
       _setStatus(BridgeStatus.incompatible);

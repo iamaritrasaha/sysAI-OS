@@ -117,7 +117,11 @@ def handle_computer_capture(params: Dict[str, Any], context: Dict[str, Any]) -> 
         }
 
     ws_root = Path(context.get("workspace_root", os.getcwd()))
-    out_dir = ws_root / ".sysai_os" / "captures"
+    try:
+        from sysai_paths import PATHS
+        out_dir = PATHS.captures_dir()
+    except Exception:
+        out_dir = ws_root / ".sysai_os" / "captures"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"capture-{int(time.time() * 1000)}.png"
 

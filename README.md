@@ -102,6 +102,21 @@ SysAI OS gained three new operational surfaces, all going through the same Capab
 
 ---
 
+## Phase 6: Productionization, Packaging & Execution Isolation
+
+SysAI OS is fully relocatable, persistent, and hardened for alpha distribution:
+
+- **Centralized XDG Path Layer**: All runtime state, logs, sockets, and configuration follow the XDG standard under `~/.local/state/sysai-os`, `~/.config/sysai-os`, `~/.cache/sysai-os`, and `$XDG_RUNTIME_DIR/sysai-os`. Overridable via `SYSAI_*` environment variables.
+- **Dedicated Virtual Environment**: A standalone user-local virtual environment isolates SysAI engine dependencies at `~/.local/share/sysai-os/venv`.
+- **Systemd User Service**: Run the persistent runtime as a systemd user unit (`sysai-os-runtime.service`) via `manage-service.sh`. Flutter automatically discovers and connects to the running service.
+- **Bubblewrap Shell Sandbox**: Agent-executed shell commands run inside a lightweight bubblewrap (`bwrap`) container with configurable isolation profiles (`observe`, `workspace_write`, `network_enabled`, `build_test`).
+- **Asynchronous Browser Cancellation**: Browser page fetching and file downloads are asynchronously cancellable via dedicated worker threads.
+- **Packaging & Installation**: Idempotent installer (`install.sh`), uninstaller (`uninstall.sh`), release tarball generator (`package.sh`), and clean-environment smoke test (`smoke_test.sh`).
+
+For full installation and sandbox details, see [docs/INSTALL.md](docs/INSTALL.md) and [docs/SANDBOX.md](docs/SANDBOX.md).
+
+---
+
 ## Phase 1 Capabilities
 
 - **Command Center (Home)**: State goals, view active runs, and monitor engine health and model configuration.
@@ -110,3 +125,4 @@ SysAI OS gained three new operational surfaces, all going through the same Capab
 - **Experience View**: Read-only explorer into SysAI's Experience Engine memory store (`memory.db`), with search and pattern statistics.
 - **System View**: Real-time engine health, versions, and deterministic `doctor` diagnostic checks.
 - **Workspace View**: Project structure inspection and foundation for future agentic workspace tools.
+

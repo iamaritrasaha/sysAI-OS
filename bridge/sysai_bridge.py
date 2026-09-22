@@ -75,6 +75,18 @@ def _find_sysai_path() -> Path | None:
         if c.is_dir() and (c / "sysai").is_dir():
             return c
 
+    # Installed venv / engine directory (production install)
+    try:
+        from sysai_paths import PATHS
+        venv_path = PATHS.find_sysai_in_venv()
+        if venv_path:
+            return venv_path
+        engine_path = PATHS.find_sysai_in_engine_install()
+        if engine_path:
+            return engine_path
+    except ImportError:
+        pass  # sysai_paths not available (very early bootstrap)
+
     return None
 
 

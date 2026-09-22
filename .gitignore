@@ -72,3 +72,32 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Release artifacts and packaging
+dist/
+release/
+*.tar.gz
+*.deb
+*.AppImage
+*.rpm
+install/staging/
+
+# Runtime-generated files that must never enter git
+*.pid
+*.lock
+*.sock
+
+# Logs (runtime logs live in XDG dirs, but guard against accidental placement)
+logs/
+*.log
+
+# Bridge test scratch directories
+bridge/tests/tmp*/
+bridge/tests/scratch*/
+bridge/tests/__pycache__/
+bridge/__pycache__/
+bridge/capabilities/__pycache__/
+bridge/policy/__pycache__/
+
+# Smoke test and CI staging
+.smoke_test/

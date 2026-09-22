@@ -273,6 +273,25 @@ def _handle_shell_execute(params: Dict[str, Any], context: Dict[str, Any]) -> Di
     if not cmd:
         return {"error": "No command provided", "success": False}
 
+    # ── Sandbox wrapping (defense-in-depth after Policy Engine) ───────────────
+    sandbox_applied = False
+    try:
+        from sandbox import wrap_command, get_sandbox_state, SandboxState, requires_approval_when_unsandboxed
+        wrapped_cmd, sandbox_applied = wrap_command(cmd, ws_root)
+        if not sandbox_applied:
+            state = get_sandbox_state()
+            # If sandbox is unavailable (not disabled by user) and approval
+            # fallback is configured, surface that in the event log.
+            if state == SandboxState.UNAVAILABLE and requires_approval_when_unsandboxed():
+                if emit:
+                    emit({"type": "terminal.sandbox_unavailable", "run_id": str(context.get("run_id", "")),
+                          "note": "bubblewrap not available; command runs without OS-level containment"})
+        else:
+            cmd = wrapped_cmd
+    except Exception:
+        # sandbox.py unavailable or bwrap probe failed — proceed without sandbox
+        pass
+
     purpose = params.get("purpose", "Shell command")
     timeout = int(params.get("timeout", 60))
 
@@ -382,6 +401,7 @@ def _handle_shell_execute(params: Dict[str, Any], context: Dict[str, Any]) -> Di
         "success": success,
         "timed_out": timed_out,
         "truncated": any_truncated,
+        "sandbox_applied": sandbox_applied,
     }
 
     # Meaningful-artifact criteria: a failed or substantial command becomes a
